@@ -1,231 +1,549 @@
+// ============================================
+// RACE TO THE TOP - 2 Player Competitive Puzzle
+// ============================================
+
+// GLOBAL VARIABLES
 let gameState = 'menu';
-let score = 0;
-let crane, currentBlock;
-let blocks = [];
+let winner = null;
+let players = [];
 let particles = [];
 
-const GRAVITY = 0.3;
-const FRICTION = 0.98;
-const DAMPING = 0.95;
-const MAX_VEL = 15;
+// COLOR PALETTE (5 distinct colors)
+let COLORS;
 
-const FLOOR_WIDTH = 200;
-const FLOOR_X = 400;
-const FLOOR_Y = 550;
-const BLOCK_W = 70;
-const BLOCK_H = 35;
+// CONSTANTS (Grid structure)
+const COLS = 4;           // 4 columns per player
+const ROWS = 12;          // Grid height
+const DROP_SPEED = 8;     // Falling speed
+const TNT_CHANCE = 0.08;  // 8% chance for TNT block
 
-let swingSpeed = 0.025;
+// DYNAMIC LAYOUT VARIABLES (recalculated on resize)
+let BLOCK_SIZE;
+let SIDE_PANEL_WIDTH;
+let GAME_AREA_WIDTH;
+let GAME_AREA_HEIGHT;
+const LIMIT_LINE_ROW = 1;  // Win condition row
 
-class Block {
-  constructor(x, y, type = 'normal') {
-    this.x = x;
-    this.y = y;
-    this.w = BLOCK_W;
-    this.h = BLOCK_H;
-    this.vx = 0;
-    this.vy = 0;
-    this.rot = 0;
-    this.rotSpeed = 0;
-    this.settled = false;
-    this.settleTimer = 0;
-    this.onCrane = true;
-    this.type = type;
+// ============================================
+// RESPONSIVE LAYOUT CALCULATION
+// ============================================
+function calculateLayout() {
+  // Calculate optimal block size based on screen dimensions
+  // Use 70% of screen height for game area, divided by number of rows
+  let maxHeightBlock = (windowHeight * 0.7) / ROWS;
+  // Use available width (accounting for side panels and spacing)
+  let maxWidthBlock = (windowWidth * 0.35) / COLS;
+  
+  // Use the smaller value to ensure it fits both dimensions
+  BLOCK_SIZE = min(maxHeightBlock, maxWidthBlock);
+  BLOCK_SIZE = constrain(BLOCK_SIZE, 30, 60); // Min 30px, Max 60px
+  
+  // Calculate derived dimensions
+  GAME_AREA_WIDTH = COLS * BLOCK_SIZE;
+  GAME_AREA_HEIGHT = ROWS * BLOCK_SIZE;
+  SIDE_PANEL_WIDTH = windowWidth * 0.08; // 8% of screen width
+  SIDE_PANEL_WIDTH = constrain(SIDE_PANEL_WIDTH, 80, 150);
+}
+
+// ============================================
+// PLAYER CLASS
+// ============================================
+class Player {
+  constructor(id, offsetX, offsetY) {
+    this.id = id;
+    this.offsetX = offsetX;  // X offset for this player's game area
+    this.offsetY = offsetY;  // Y offset for this player's game area
+    this.grid = this.createEmptyGrid();
+    this.craneCol = 1;  // Start in second column (0-indexed)
+    this.currentBlock = null;
+    this.nextBlockColor = null;
+    this.nextBlockIsTNT = false;
+    this.dropping = false;
+    this.dropY = 0;
+    this.score = 0;
+    this.comboCount = 0;
     
-    if (type === 'heavy') {
-      this.weight = 2;
-      this.col = color(60, 60, 60);
-      this.label = 'HEAVY';
-    } else if (type === 'glue') {
-      this.weight = 1;
-      this.col = color(255, 180, 30);
-      this.label = 'GLUE';
-      this.friction = 0.85;
-    } else if (type === 'bomb') {
-      this.weight = 1;
-      this.col = color(255, 40, 40);
-      this.label = 'BOMB';
-      this.exploded = false;
-    } else {
-      this.weight = 1;
-      this.col = color(80, 140, 255);
-      this.label = '';
-    }
+    this.prepareNextBlock();
+    this.spawnBlock();
   }
   
-  physics() {
-    if (this.settled || this.onCrane) return;
-    
-    this.vy += GRAVITY * this.weight;
-    this.vx = constrain(this.vx, -MAX_VEL, MAX_VEL);
-    this.vy = constrain(this.vy, -MAX_VEL, MAX_VEL);
-    
-    this.x += this.vx;
-    this.y += this.vy;
-    this.rot += this.rotSpeed;
-    
-    this.vx *= (this.friction || FRICTION);
-    this.rotSpeed *= DAMPING;
-    
-    this.checkFloor();
-    this.checkBlocks();
-    this.checkOffscreen();
-  }
-  
-  checkFloor() {
-    let floorLeft = FLOOR_X - FLOOR_WIDTH / 2;
-    let floorRight = FLOOR_X + FLOOR_WIDTH / 2;
-    
-    if (this.y + this.h/2 >= FLOOR_Y) {
-      if (this.x > floorLeft && this.x < floorRight) {
-        this.y = FLOOR_Y - this.h/2;
-        this.vy = 0;
-        this.vx *= 0.5;
-        this.checkSettle();
+  createEmptyGrid() {
+    let grid = [];
+    for (let row = 0; row < ROWS; row++) {
+      grid[row] = [];
+      for (let col = 0; col < COLS; col++) {
+        grid[row][col] = null;
       }
     }
+    return grid;
   }
   
-  checkBlocks() {
-    for (let b of blocks) {
-      if (b === this || !b.settled) continue;
+  prepareNextBlock() {
+    // Determine next block
+    this.nextBlockIsTNT = random() < TNT_CHANCE;
+    if (!this.nextBlockIsTNT) {
+      this.nextBlockColor = floor(random(5));  // 0-4 for 5 colors
+    }
+  }
+  
+  spawnBlock() {
+    if (this.nextBlockIsTNT) {
+      this.currentBlock = { color: -1, isTNT: true };
+    } else {
+      this.currentBlock = { color: this.nextBlockColor, isTNT: false };
+    }
+    this.dropping = false;
+    this.dropY = 0;
+    this.prepareNextBlock();
+  }
+  
+  moveCrane(dir) {
+    if (this.dropping) return;
+    this.craneCol = constrain(this.craneCol + dir, 0, COLS - 1);
+  }
+  
+  dropBlock() {
+    if (this.dropping || !this.currentBlock) return;
+    this.dropping = true;
+    this.dropY = 0;
+  }
+  
+  update() {
+    if (this.dropping && this.currentBlock) {
+      this.dropY += DROP_SPEED;
       
-      if (this.collidesWith(b)) {
-        this.y = b.y - (this.h + b.h) / 2;
-        this.vy = 0;
-        this.vx *= 0.3;
-        this.rotSpeed *= 0.5;
-        
-        if (this.type === 'bomb' && !this.exploded) {
-          this.explode();
-        }
-        
-        this.checkSettle();
-        break;
+      // Find landing row
+      let landingRow = this.findLandingRow(this.craneCol);
+      let targetY = landingRow * BLOCK_SIZE;
+      
+      if (this.dropY >= targetY) {
+        // Block has landed
+        this.dropY = targetY;
+        this.placeBlock(landingRow, this.craneCol);
+        this.dropping = false;
       }
     }
   }
   
-  collidesWith(b) {
-    let overlapX = (this.x + this.w/2 > b.x - b.w/2 && this.x - this.w/2 < b.x + b.w/2);
-    let overlapY = (this.y + this.h/2 > b.y - b.h/2 && this.y - this.h/2 < b.y + b.h/2);
-    return overlapX && overlapY && this.vy > 0;
+  findLandingRow(col) {
+    for (let row = ROWS - 1; row >= 0; row--) {
+      if (this.grid[row][col] === null) {
+        return row;
+      }
+    }
+    return -1;  // Column is full
   }
   
-  checkSettle() {
-    if (abs(this.vx) < 0.1 && abs(this.vy) < 0.1 && abs(this.rotSpeed) < 0.01) {
-      this.settleTimer++;
-      if (this.settleTimer > 30) {
-        this.settled = true;
-        this.vx = 0;
-        this.vy = 0;
-        this.rotSpeed = 0;
-      }
+  placeBlock(row, col) {
+    if (row < 0) return;  // Column full
+    
+    if (this.currentBlock.isTNT) {
+      // TNT explosion!
+      this.explodeTNT(row, col);
     } else {
-      this.settleTimer = 0;
+      this.grid[row][col] = this.currentBlock.color;
+      this.score += 10;
+      
+      // Check for matches
+      this.comboCount = 0;
+      this.checkAndClearMatches();
     }
+    
+    // Spawn next block
+    this.spawnBlock();
   }
   
-  checkOffscreen() {
-    if (this.y > height + 50) {
-      if (this.type === 'bomb') {
-        this.destroy();
-        spawnBlock();
-      } else {
-        gameOver();
-      }
-    }
-  }
-  
-  explode() {
-    this.exploded = true;
-    for (let i = 0; i < 25; i++) {
+  explodeTNT(row, col) {
+    // Create explosion particles
+    let centerX = this.offsetX + col * BLOCK_SIZE + BLOCK_SIZE / 2;
+    let centerY = this.offsetY + row * BLOCK_SIZE + BLOCK_SIZE / 2;
+    
+    for (let i = 0; i < 30; i++) {
       let a = random(TWO_PI);
-      let s = random(2, 7);
-      particles.push(new Particle(this.x, this.y, cos(a)*s, sin(a)*s, color(255, 150, 0)));
+      let s = random(3, 8);
+      particles.push(new Particle(centerX, centerY, cos(a) * s, sin(a) * s, color(255, 150, 0)));
     }
     
-    for (let b of blocks) {
-      if (b === this) continue;
-      let d = dist(this.x, this.y, b.x, b.y);
-      if (d < 120) {
-        let force = map(d, 0, 120, 12, 2);
-        let ang = atan2(b.y - this.y, b.x - this.x);
-        b.vx += cos(ang) * force;
-        b.vy += sin(ang) * force;
-        b.rotSpeed += random(-0.3, 0.3);
-        b.settled = false;
+    // Clear 3x3 area around explosion
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        let r = row + dr;
+        let c = col + dc;
+        if (r >= 0 && r < ROWS && c >= 0 && c < COLS) {
+          if (this.grid[r][c] !== null) {
+            // Create pop particles
+            let px = this.offsetX + c * BLOCK_SIZE + BLOCK_SIZE / 2;
+            let py = this.offsetY + r * BLOCK_SIZE + BLOCK_SIZE / 2;
+            this.createPopParticles(px, py, COLORS[this.grid[r][c]]);
+            this.grid[r][c] = null;
+            this.score += 20;
+          }
+        }
+      }
+    }
+    
+    // Apply gravity
+    this.applyGravity();
+    this.checkAndClearMatches();
+  }
+  
+  checkAndClearMatches() {
+    let matched = this.findMatches();
+    
+    if (matched.length > 0) {
+      this.comboCount++;
+      
+      // Clear matched blocks
+      for (let pos of matched) {
+        let px = this.offsetX + pos.col * BLOCK_SIZE + BLOCK_SIZE / 2;
+        let py = this.offsetY + pos.row * BLOCK_SIZE + BLOCK_SIZE / 2;
+        this.createPopParticles(px, py, COLORS[this.grid[pos.row][pos.col]]);
+        this.grid[pos.row][pos.col] = null;
+      }
+      
+      this.score += matched.length * 15 * this.comboCount;
+      
+      // Apply gravity
+      this.applyGravity();
+      
+      // Check for chain reactions
+      this.checkAndClearMatches();
+    }
+  }
+  
+  findMatches() {
+    let matched = new Set();
+    
+    // Check all positions for groups of 3+
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        if (this.grid[row][col] !== null) {
+          let color = this.grid[row][col];
+          let group = this.floodFill(row, col, color, new Set());
+          
+          if (group.size >= 3) {
+            for (let pos of group) {
+              matched.add(pos);
+            }
+          }
+        }
+      }
+    }
+    
+    // Convert set to array of positions
+    let result = [];
+    for (let pos of matched) {
+      let [r, c] = pos.split(',').map(Number);
+      result.push({ row: r, col: c });
+    }
+    
+    return result;
+  }
+  
+  floodFill(row, col, targetColor, visited) {
+    let key = `${row},${col}`;
+    
+    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return visited;
+    if (visited.has(key)) return visited;
+    if (this.grid[row][col] !== targetColor) return visited;
+    
+    visited.add(key);
+    
+    // Check 4 directions (orthogonal only)
+    this.floodFill(row - 1, col, targetColor, visited);
+    this.floodFill(row + 1, col, targetColor, visited);
+    this.floodFill(row, col - 1, targetColor, visited);
+    this.floodFill(row, col + 1, targetColor, visited);
+    
+    return visited;
+  }
+  
+  applyGravity() {
+    // For each column, drop blocks down
+    for (let col = 0; col < COLS; col++) {
+      let writeRow = ROWS - 1;
+      
+      for (let row = ROWS - 1; row >= 0; row--) {
+        if (this.grid[row][col] !== null) {
+          if (row !== writeRow) {
+            this.grid[writeRow][col] = this.grid[row][col];
+            this.grid[row][col] = null;
+          }
+          writeRow--;
+        }
       }
     }
   }
   
-  destroy() {
-    let idx = blocks.indexOf(this);
-    if (idx > -1) blocks.splice(idx, 1);
-    if (currentBlock === this) currentBlock = null;
+  createPopParticles(x, y, col) {
+    for (let i = 0; i < 8; i++) {
+      let a = random(TWO_PI);
+      let s = random(2, 5);
+      particles.push(new Particle(x, y, cos(a) * s, sin(a) * s, col));
+    }
   }
   
-  show() {
-    push();
-    translate(this.x, this.y);
-    rotate(this.rot);
-    fill(this.col);
-    stroke(0);
-    strokeWeight(2);
-    rectMode(CENTER);
-    rect(0, 0, this.w, this.h, 4);
-    
-    if (this.label) {
-      fill(255);
-      noStroke();
-      textAlign(CENTER, CENTER);
-      textSize(11);
-      text(this.label, 0, 0);
+  checkWinCondition() {
+    // Check if any block is at or above the limit line
+    for (let col = 0; col < COLS; col++) {
+      if (this.grid[LIMIT_LINE_ROW][col] !== null) {
+        return true;
+      }
     }
+    return false;
+  }
+  
+  draw() {
+    push();
+    
+    // Holographic panel frame
+    let frameCol = this.id === 1 ? color(0, 255, 255) : color(255, 100, 255);
+    noFill();
+    stroke(frameCol);
+    strokeWeight(2);
+    rect(this.offsetX - 5, this.offsetY - 5, GAME_AREA_WIDTH + 10, GAME_AREA_HEIGHT + 10);
+    
+    // Outer glow
+    stroke(red(frameCol), green(frameCol), blue(frameCol), 30);
+    strokeWeight(8);
+    rect(this.offsetX - 8, this.offsetY - 8, GAME_AREA_WIDTH + 16, GAME_AREA_HEIGHT + 16);
+    
+    // Corner brackets
+    stroke(frameCol);
+    strokeWeight(3);
+    let cornerSize = 15;
+    // Top-left
+    line(this.offsetX - 10, this.offsetY - 10, this.offsetX - 10 + cornerSize, this.offsetY - 10);
+    line(this.offsetX - 10, this.offsetY - 10, this.offsetX - 10, this.offsetY - 10 + cornerSize);
+    // Top-right
+    line(this.offsetX + GAME_AREA_WIDTH + 10 - cornerSize, this.offsetY - 10, this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY - 10);
+    line(this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY - 10, this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY - 10 + cornerSize);
+    // Bottom-left
+    line(this.offsetX - 10, this.offsetY + GAME_AREA_HEIGHT + 10, this.offsetX - 10 + cornerSize, this.offsetY + GAME_AREA_HEIGHT + 10);
+    line(this.offsetX - 10, this.offsetY + GAME_AREA_HEIGHT + 10 - cornerSize, this.offsetX - 10, this.offsetY + GAME_AREA_HEIGHT + 10);
+    // Bottom-right
+    line(this.offsetX + GAME_AREA_WIDTH + 10 - cornerSize, this.offsetY + GAME_AREA_HEIGHT + 10, this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY + GAME_AREA_HEIGHT + 10);
+    line(this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY + GAME_AREA_HEIGHT + 10 - cornerSize, this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY + GAME_AREA_HEIGHT + 10);
+    
+    // Draw game area background (dark transparent)
+    fill(5, 10, 20, 180);
+    noStroke();
+    rect(this.offsetX, this.offsetY, GAME_AREA_WIDTH, GAME_AREA_HEIGHT);
+    
+    // Draw grid lines (tech grid)
+    stroke(red(frameCol), green(frameCol), blue(frameCol), 20);
+    strokeWeight(1);
+    for (let i = 1; i < COLS; i++) {
+      let x = this.offsetX + i * BLOCK_SIZE;
+      line(x, this.offsetY, x, this.offsetY + GAME_AREA_HEIGHT);
+    }
+    for (let i = 1; i < ROWS; i++) {
+      let y = this.offsetY + i * BLOCK_SIZE;
+      line(this.offsetX, y, this.offsetX + GAME_AREA_WIDTH, y);
+    }
+    
+    // Draw limit line (neon red)
+    stroke(255, 20, 60);
+    strokeWeight(3);
+    let limitY = this.offsetY + (LIMIT_LINE_ROW + 1) * BLOCK_SIZE;
+    line(this.offsetX, limitY, this.offsetX + GAME_AREA_WIDTH, limitY);
+    
+    // Glowing limit line
+    stroke(255, 20, 60, 100);
+    strokeWeight(6);
+    line(this.offsetX, limitY, this.offsetX + GAME_AREA_WIDTH, limitY);
+    
+    // Draw "WIN LINE" label with glow
+    fill(255, 20, 60, 150);
+    noStroke();
+    textSize(11);
+    textAlign(LEFT, BOTTOM);
+    text('WIN', this.offsetX + 6, limitY - 3);
+    fill(255, 20, 60);
+    textSize(10);
+    text('WIN', this.offsetX + 5, limitY - 2);
+    
+    // Draw placed blocks
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        if (this.grid[row][col] !== null) {
+          let x = this.offsetX + col * BLOCK_SIZE;
+          let y = this.offsetY + row * BLOCK_SIZE;
+          this.drawBlock(x, y, COLORS[this.grid[row][col]], false);
+        }
+      }
+    }
+    
+    // Draw crane
+    this.drawCrane();
+    
+    // Draw current falling block
+    if (this.currentBlock) {
+      let x = this.offsetX + this.craneCol * BLOCK_SIZE;
+      let y = this.offsetY + (this.dropping ? this.dropY : -BLOCK_SIZE + 10);
+      
+      if (this.currentBlock.isTNT) {
+        this.drawTNTBlock(x, y);
+      } else {
+        this.drawBlock(x, y, COLORS[this.currentBlock.color], false);
+      }
+    }
+    
+    pop();
+  }
+  
+  drawCrane() {
+    let craneX = this.offsetX + this.craneCol * BLOCK_SIZE + BLOCK_SIZE / 2;
+    let craneY = this.offsetY + (-BLOCK_SIZE + 5);
+    let glowCol = this.id === 1 ? color(0, 255, 255) : color(255, 100, 255);
+    
+    push();
+    
+    // Sci-fi data beam
+    stroke(red(glowCol), green(glowCol), blue(glowCol), 40);
+    strokeWeight(BLOCK_SIZE - 8);
+    line(craneX, craneY - 25, craneX, craneY + 10);
+    
+    // Energy beam core
+    stroke(glowCol);
+    strokeWeight(2);
+    line(craneX, craneY - 25, craneX, craneY + 10);
+    
+    // Data injector head
+    fill(10, 15, 25);
+    stroke(glowCol);
+    strokeWeight(3);
+    rect(craneX - 12, craneY - 30, 24, 12, 2);
+    
+    // Holographic brackets
+    noFill();
+    stroke(glowCol);
+    strokeWeight(2);
+    line(craneX - 15, craneY - 28, craneX - 10, craneY - 28);
+    line(craneX - 15, craneY - 28, craneX - 15, craneY - 23);
+    line(craneX + 15, craneY - 28, craneX + 10, craneY - 28);
+    line(craneX + 15, craneY - 28, craneX + 15, craneY - 23);
+    
+    // Column highlight with scan effect
+    noFill();
+    stroke(red(glowCol), green(glowCol), blue(glowCol), 30);
+    strokeWeight(2);
+    rect(this.offsetX + this.craneCol * BLOCK_SIZE + 2, this.offsetY, BLOCK_SIZE - 4, GAME_AREA_HEIGHT);
+    
+    // Scanning line
+    let scanY = (frameCount * 3) % GAME_AREA_HEIGHT;
+    stroke(glowCol);
+    strokeWeight(1);
+    line(this.offsetX + this.craneCol * BLOCK_SIZE + 2, this.offsetY + scanY, 
+         this.offsetX + this.craneCol * BLOCK_SIZE + BLOCK_SIZE - 2, this.offsetY + scanY);
+    
+    pop();
+  }
+  
+  drawBlock(x, y, col, highlighted) {
+    push();
+    
+    // Translucent interior (glass/energy field effect)
+    fill(red(col), green(col), blue(col), 35);
+    noStroke();
+    rect(x + 4, y + 4, BLOCK_SIZE - 8, BLOCK_SIZE - 8, 3);
+    
+    // Thick neon glowing border
+    noFill();
+    stroke(col);
+    strokeWeight(3);
+    rect(x + 3, y + 3, BLOCK_SIZE - 6, BLOCK_SIZE - 6, 3);
+    
+    // Outer glow
+    stroke(red(col), green(col), blue(col), 80);
+    strokeWeight(5);
+    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 3);
+    
+    // Inner circuit pattern
+    stroke(col);
+    strokeWeight(1);
+    line(x + 8, y + BLOCK_SIZE/2, x + BLOCK_SIZE - 8, y + BLOCK_SIZE/2);
+    line(x + BLOCK_SIZE/2, y + 8, x + BLOCK_SIZE/2, y + BLOCK_SIZE - 8);
+    
+    // Corner accents
+    strokeWeight(2);
+    point(x + 6, y + 6);
+    point(x + BLOCK_SIZE - 6, y + 6);
+    point(x + 6, y + BLOCK_SIZE - 6);
+    point(x + BLOCK_SIZE - 6, y + BLOCK_SIZE - 6);
+    
+    pop();
+  }
+  
+  drawTNTBlock(x, y) {
+    push();
+    let tntCol = color(255, 50, 0);
+    
+    // Translucent interior
+    fill(255, 50, 0, 40);
+    noStroke();
+    rect(x + 4, y + 4, BLOCK_SIZE - 8, BLOCK_SIZE - 8, 3);
+    
+    // Pulsing glow effect
+    let pulse = sin(frameCount * 0.15) * 20 + 150;
+    stroke(255, 50, 0, pulse);
+    strokeWeight(4);
+    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 3);
+    
+    // Bright neon border
+    stroke(tntCol);
+    strokeWeight(3);
+    rect(x + 3, y + 3, BLOCK_SIZE - 6, BLOCK_SIZE - 6, 3);
+    
+    // Warning symbol
+    fill(255, 255, 0);
+    noStroke();
+    textSize(BLOCK_SIZE * 0.3);
+    textAlign(CENTER, CENTER);
+    textStyle(BOLD);
+    text('⚠', x + BLOCK_SIZE / 2, y + BLOCK_SIZE / 2);
+    textStyle(NORMAL);
+    
+    pop();
+  }
+  
+  drawNextBlock(x, y) {
+    push();
+    translate(x, y);
+    
+    // Holographic preview box
+    let boxCol = this.id === 1 ? color(0, 255, 255) : color(255, 100, 255);
+    fill(5, 10, 20, 200);
+    stroke(boxCol);
+    strokeWeight(2);
+    rect(0, 0, BLOCK_SIZE + 10, BLOCK_SIZE + 10, 3);
+    
+    // Corner accents
+    strokeWeight(3);
+    let cs = 6;
+    line(0, 0, cs, 0);
+    line(0, 0, 0, cs);
+    line(BLOCK_SIZE + 10 - cs, 0, BLOCK_SIZE + 10, 0);
+    line(BLOCK_SIZE + 10, 0, BLOCK_SIZE + 10, cs);
+    line(0, BLOCK_SIZE + 10 - cs, 0, BLOCK_SIZE + 10);
+    line(0, BLOCK_SIZE + 10, cs, BLOCK_SIZE + 10);
+    line(BLOCK_SIZE + 10 - cs, BLOCK_SIZE + 10, BLOCK_SIZE + 10, BLOCK_SIZE + 10);
+    line(BLOCK_SIZE + 10, BLOCK_SIZE + 10 - cs, BLOCK_SIZE + 10, BLOCK_SIZE + 10);
+    
+    // Next block
+    if (this.nextBlockIsTNT) {
+      this.drawTNTBlock(5, 5);
+    } else {
+      this.drawBlock(5, 5, COLORS[this.nextBlockColor], false);
+    }
+    
     pop();
   }
 }
 
-class Crane {
-  constructor() {
-    this.x = FLOOR_X;
-    this.y = 60;
-    this.angle = 0;
-    this.len = 140;
-  }
-  
-  update() {
-    this.angle += swingSpeed;
-  }
-  
-  getPos() {
-    return {
-      x: this.x + sin(this.angle) * this.len,
-      y: this.y + this.len
-    };
-  }
-  
-  show() {
-    stroke(80);
-    strokeWeight(4);
-    line(this.x - 25, this.y - 15, this.x + 25, this.y - 15);
-    line(this.x, this.y - 15, this.x, this.y);
-    
-    fill(120);
-    noStroke();
-    circle(this.x, this.y, 12);
-    
-    let p = this.getPos();
-    stroke(120);
-    strokeWeight(2);
-    line(this.x, this.y, p.x, p.y);
-    
-    fill(150);
-    noStroke();
-    circle(p.x, p.y, 7);
-  }
-}
-
+// ============================================
+// PARTICLE CLASS
+// ============================================
 class Particle {
   constructor(x, y, vx, vy, col) {
     this.x = x;
@@ -234,17 +552,18 @@ class Particle {
     this.vy = vy;
     this.col = col;
     this.life = 255;
-    this.size = random(3, 7);
+    this.size = random(4, 10);
   }
   
   update() {
     this.x += this.vx;
     this.y += this.vy;
-    this.vy += 0.2;
-    this.life -= 5;
+    this.vy += 0.3;
+    this.vx *= 0.98;
+    this.life -= 8;
   }
   
-  show() {
+  draw() {
     noStroke();
     fill(red(this.col), green(this.col), blue(this.col), this.life);
     circle(this.x, this.y, this.size);
@@ -255,13 +574,89 @@ class Particle {
   }
 }
 
+// ============================================
+// CORE FUNCTIONS
+// ============================================
 function setup() {
-  createCanvas(800, 600);
+  // Create full-screen canvas
+  createCanvas(windowWidth, windowHeight);
   textFont('Arial');
+  
+  // Calculate responsive layout
+  calculateLayout();
+  
+  // Initialize colors - NEON TECH PALETTE
+  COLORS = [
+    color(255, 20, 147),   // Neon Pink
+    color(0, 255, 255),    // Cyan
+    color(0, 255, 100),    // Electric Green
+    color(255, 215, 0),    // Gold
+    color(138, 43, 226)    // Neon Purple
+  ];
+}
+
+function windowResized() {
+  // Resize canvas to new window dimensions
+  resizeCanvas(windowWidth, windowHeight);
+  
+  // Recalculate layout with new dimensions
+  calculateLayout();
+  
+  // Reinitialize menu buttons with new positions
+  if (gameState === 'menu') {
+    initMenuButtons();
+  }
+  
+  // Update player positions if game is active
+  if (gameState === 'playing' || gameState === 'gameOver') {
+    updatePlayerPositions();
+  }
+}
+
+function drawTechBackground() {
+  background(5, 10, 20);
+  
+  // Digital grid overlay
+  stroke(0, 255, 255, 20);
+  strokeWeight(1);
+  
+  let gridSize = 40;
+  // Vertical lines
+  for (let x = 0; x < windowWidth; x += gridSize) {
+    line(x, 0, x, windowHeight);
+  }
+  // Horizontal lines
+  for (let y = 0; y < windowHeight; y += gridSize) {
+    line(0, y, windowWidth, y);
+  }
+  
+  // Subtle scanline effect
+  for (let y = 0; y < windowHeight; y += 4) {
+    stroke(0, 255, 255, 2);
+    line(0, y, windowWidth, y);
+  }
+}
+
+function updatePlayerPositions() {
+  if (players.length === 2) {
+    let gameY = windowHeight * 0.15; // 15% from top
+    let spacing = windowWidth * 0.05; // 5% spacing
+    
+    // Player 1 at 25% of screen width (left quarter)
+    let p1X = (windowWidth * 0.25) - (GAME_AREA_WIDTH / 2);
+    
+    // Player 2 at 75% of screen width (right quarter)
+    let p2X = (windowWidth * 0.75) - (GAME_AREA_WIDTH / 2);
+    
+    players[0].offsetX = p1X;
+    players[0].offsetY = gameY;
+    players[1].offsetX = p2X;
+    players[1].offsetY = gameY;
+  }
 }
 
 function draw() {
-  background(15, 20, 35);
+  drawTechBackground();
   
   if (gameState === 'menu') {
     drawMenu();
@@ -269,173 +664,553 @@ function draw() {
     updateGame();
     drawGame();
   } else if (gameState === 'gameOver') {
-    drawGameOver();
+    drawGame();
+    drawWinScreen();
   }
+}
+
+// ============================================
+// MENU
+// ============================================
+
+// Button dimensions and positions
+let singlePlayerButton, twoPlayerButton;
+
+function initMenuButtons() {
+  let buttonWidth = min(windowWidth * 0.35, 350);
+  let buttonHeight = windowHeight * 0.08;
+  buttonHeight = constrain(buttonHeight, 60, 90);
+  let buttonSpacing = windowHeight * 0.04;
+  let startY = windowHeight * 0.55;
+  
+  singlePlayerButton = {
+    x: windowWidth / 2 - buttonWidth / 2,
+    y: startY,
+    w: buttonWidth,
+    h: buttonHeight,
+    label: 'Single Player',
+    sublabel: 'Coming Soon',
+    enabled: false
+  };
+  
+  twoPlayerButton = {
+    x: windowWidth / 2 - buttonWidth / 2,
+    y: startY + buttonHeight + buttonSpacing,
+    w: buttonWidth,
+    h: buttonHeight,
+    label: '2 Player',
+    sublabel: 'Race to the Top!',
+    enabled: true
+  };
 }
 
 function drawMenu() {
-  fill(255);
+  // Animated background blocks
+  drawMenuBackground();
+  
+  // Title - "Tower Tumble" with neon glow
+  push();
   textAlign(CENTER, CENTER);
-  textSize(64);
-  text('TOWER TUMBLE', width/2, height/2 - 100);
   
-  textSize(28);
-  text('High Stakes Edition', width/2, height/2 - 50);
+  // Calculate responsive font sizes
+  let titleSize = min(windowWidth * 0.09, 80);
+  let subtitleSize = min(windowWidth * 0.025, 24);
   
-  textSize(16);
-  fill(200);
-  text('Build on the small platform', width/2, height/2);
-  text('Miss the floor = GAME OVER', width/2, height/2 + 25);
-  text('Bombs are the exception - they just respawn!', width/2, height/2 + 50);
+  // "TOWER" with cyan glow
+  textSize(titleSize);
+  textStyle(BOLD);
+  fill(0, 255, 255, 100);
+  text('TOWER', windowWidth / 2 + 3, windowHeight * 0.25 + 3);
+  fill(0, 255, 255);
+  text('TOWER', windowWidth / 2, windowHeight * 0.25);
   
-  textSize(20);
-  fill(100, 255, 100);
-  text('CLICK TO START', width/2, height/2 + 120);
+  // "TUMBLE" with pink glow
+  fill(255, 20, 147, 100);
+  text('TUMBLE', windowWidth / 2 + 3, windowHeight * 0.35 + 3);
+  fill(255, 20, 147);
+  text('TUMBLE', windowWidth / 2, windowHeight * 0.35);
+  textStyle(NORMAL);
+  
+  // Subtitle with glow
+  textSize(subtitleSize);
+  fill(138, 43, 226, 120);
+  text('Competitive Puzzle Challenge', windowWidth / 2 + 2, windowHeight * 0.44 + 2);
+  fill(138, 43, 226);
+  text('Competitive Puzzle Challenge', windowWidth / 2, windowHeight * 0.44);
+  pop();
+  
+  // Draw buttons
+  if (!singlePlayerButton) initMenuButtons();
+  
+  drawButton(singlePlayerButton);
+  drawButton(twoPlayerButton);
+  
+  // Instructions at bottom with glow
+  textAlign(CENTER, CENTER);
+  textSize(min(windowWidth * 0.018, 16));
+  fill(0, 255, 255, 150);
+  text('Match 3+ blocks • First to the top wins!', windowWidth / 2 + 1, windowHeight - 59);
+  fill(0, 255, 255);
+  text('Match 3+ blocks • First to the top wins!', windowWidth / 2, windowHeight - 60);
 }
 
-function updateGame() {
-  crane.update();
+function drawMenuBackground() {
+  // Draw decorative neon blocks floating in background
+  for (let i = 0; i < 5; i++) {
+    let x = (i + 0.5) * (windowWidth / 5);
+    let yOffset = sin(frameCount * 0.02 + i) * 20;
+    let y = windowHeight * 0.1 + yOffset;
+    let blockSize = min(windowWidth * 0.04, 50);
+    let col = COLORS[i];
+    
+    push();
+    
+    // Translucent fill
+    fill(red(col), green(col), blue(col), 40);
+    noStroke();
+    rect(x - blockSize / 2 + 2, y + 2, blockSize - 4, blockSize - 4, 3);
+    
+    // Neon border
+    noFill();
+    stroke(col);
+    strokeWeight(3);
+    rect(x - blockSize / 2, y, blockSize, blockSize, 3);
+    
+    // Outer glow
+    stroke(red(col), green(col), blue(col), 100);
+    strokeWeight(5);
+    rect(x - blockSize / 2 - 1, y - 1, blockSize + 2, blockSize + 2, 3);
+    
+    // Circuit lines
+    stroke(col);
+    strokeWeight(1);
+    line(x - blockSize / 4, y + blockSize / 2, x + blockSize / 4, y + blockSize / 2);
+    line(x, y + blockSize / 4, x, y + 3 * blockSize / 4);
+    
+    pop();
+  }
+}
+
+function drawButton(btn) {
+  push();
   
-  if (currentBlock) {
-    if (currentBlock.onCrane) {
-      let p = crane.getPos();
-      currentBlock.x = p.x;
-      currentBlock.y = p.y;
+  // Check if mouse is hovering
+  let isHovering = mouseX > btn.x && mouseX < btn.x + btn.w &&
+                   mouseY > btn.y && mouseY < btn.y + btn.h;
+  
+  if (btn.enabled) {
+    // Holographic button
+    if (isHovering) {
+      // Hover glow
+      fill(0, 255, 255, 30);
+      noStroke();
+      rect(btn.x - 5, btn.y - 5, btn.w + 10, btn.h + 10, 8);
+      
+      fill(5, 10, 20, 220);
+      stroke(0, 255, 255);
+      strokeWeight(3);
     } else {
-      currentBlock.physics();
-      if (currentBlock.settled) {
-        blocks.push(currentBlock);
-        score += 10;
-        spawnBlock();
-      }
+      fill(5, 10, 20, 180);
+      stroke(0, 255, 255, 180);
+      strokeWeight(2);
+    }
+    rect(btn.x, btn.y, btn.w, btn.h, 6);
+    
+    // Corner brackets
+    stroke(0, 255, 255);
+    strokeWeight(3);
+    let cs = 15;
+    noFill();
+    // Top-left
+    line(btn.x, btn.y, btn.x + cs, btn.y);
+    line(btn.x, btn.y, btn.x, btn.y + cs);
+    // Top-right
+    line(btn.x + btn.w - cs, btn.y, btn.x + btn.w, btn.y);
+    line(btn.x + btn.w, btn.y, btn.x + btn.w, btn.y + cs);
+    // Bottom-left
+    line(btn.x, btn.y + btn.h - cs, btn.x, btn.y + btn.h);
+    line(btn.x, btn.y + btn.h, btn.x + cs, btn.y + btn.h);
+    // Bottom-right
+    line(btn.x + btn.w - cs, btn.y + btn.h, btn.x + btn.w, btn.y + btn.h);
+    line(btn.x + btn.w, btn.y + btn.h - cs, btn.x + btn.w, btn.y + btn.h);
+  } else {
+    // Disabled button (red tech style)
+    fill(60, 65, 80);
+    stroke(90, 95, 110);
+    // Disabled button (red tech style)
+    fill(5, 10, 20, 180);
+    stroke(255, 50, 50, 100);
+    strokeWeight(2);
+    rect(btn.x, btn.y, btn.w, btn.h, 6);
+  }
+  
+  // Button text with glow
+  textAlign(CENTER, CENTER);
+  let mainTextSize = min(btn.h * 0.4, 32);
+  let subTextSize = min(btn.h * 0.2, 16);
+  
+  if (btn.enabled) {
+    // Glow
+    fill(0, 255, 255, 150);
+    noStroke();
+    textSize(mainTextSize);
+    textStyle(BOLD);
+    text(btn.label, btn.x + btn.w / 2 + 1, btn.y + btn.h / 2 - mainTextSize * 0.3 + 1);
+    
+    // Main text
+    fill(0, 255, 255);
+    text(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2 - mainTextSize * 0.3);
+    
+    textStyle(NORMAL);
+    textSize(subTextSize);
+    fill(138, 43, 226);
+    text(btn.sublabel, btn.x + btn.w / 2, btn.y + btn.h / 2 + mainTextSize * 0.5);
+  } else {
+    fill(255, 50, 50, 180);
+    noStroke();
+    textSize(mainTextSize);
+    textStyle(BOLD);
+    text(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2 - mainTextSize * 0.3);
+    
+    textStyle(NORMAL);
+    textSize(subTextSize);
+    fill(255, 50, 50, 120);
+    text(btn.sublabel, btn.x + btn.w / 2, btn.y + btn.h / 2 + mainTextSize * 0.5);
+  }
+  
+  // Disabled badge - holographic style
+  if (!btn.enabled) {
+    fill(10, 5, 5, 200);
+    stroke(255, 50, 50);
+    strokeWeight(2);
+    let badgeW = 80;
+    let badgeH = 22;
+    rect(btn.x + btn.w - badgeW - 10, btn.y + 10, badgeW, badgeH, 3);
+    
+    noStroke();
+    fill(255, 50, 50);
+    textSize(11);
+    textStyle(BOLD);
+    text('LOCKED', btn.x + btn.w - badgeW / 2 - 10, btn.y + 10 + badgeH / 2);
+    textStyle(NORMAL);
+  }
+  
+  pop();
+}
+
+// ============================================
+// GAME UPDATE
+// ============================================
+function updateGame() {
+  // Update players
+  for (let p of players) {
+    p.update();
+    
+    // Check win condition
+    if (p.checkWinCondition()) {
+      winner = p.id;
+      gameState = 'gameOver';
     }
   }
   
-  for (let b of blocks) {
-    if (!b.settled) b.physics();
-  }
-  
+  // Update particles
   for (let i = particles.length - 1; i >= 0; i--) {
     particles[i].update();
     if (particles[i].isDead()) particles.splice(i, 1);
   }
 }
 
+// ============================================
+// GAME DRAWING
+// ============================================
 function drawGame() {
-  fill(20, 25, 40);
+  // Calculate responsive positions
+  let gameY = windowHeight * 0.15; // 15% from top
+  let spacing = windowWidth * 0.05; // 5% spacing
+  
+  // Player 1 at 25% of screen width (left quarter)
+  let p1X = (windowWidth * 0.25) - (GAME_AREA_WIDTH / 2);
+  
+  // Player 2 at 75% of screen width (right quarter)  
+  let p2X = (windowWidth * 0.75) - (GAME_AREA_WIDTH / 2);
+  
+  // Draw header bar - Holographic HUD
+  fill(5, 10, 20, 220);
   noStroke();
-  rect(0, FLOOR_Y, width, height - FLOOR_Y);
+  rect(0, 0, windowWidth, windowHeight * 0.08);
   
-  fill(100, 80, 60);
-  stroke(80, 60, 40);
-  strokeWeight(3);
-  rectMode(CENTER);
-  rect(FLOOR_X, FLOOR_Y + 10, FLOOR_WIDTH, 20);
-  
-  stroke(255, 100, 100, 80);
+  // Tech border lines
+  stroke(0, 255, 255, 180);
+  strokeWeight(2);
+  line(0, windowHeight * 0.08, windowWidth, windowHeight * 0.08);
+  stroke(0, 255, 255, 80);
   strokeWeight(1);
-  line(FLOOR_X - FLOOR_WIDTH/2, FLOOR_Y, FLOOR_X - FLOOR_WIDTH/2, 0);
-  line(FLOOR_X + FLOOR_WIDTH/2, FLOOR_Y, FLOOR_X + FLOOR_WIDTH/2, 0);
+  line(0, windowHeight * 0.08 - 3, windowWidth, windowHeight * 0.08 - 3);
   
-  crane.show();
+  // Title with neon glow
+  push();
+  textAlign(CENTER, CENTER);
+  let headerTextSize = min(windowWidth * 0.025, 24);
+  textSize(headerTextSize);
   
-  for (let b of blocks) b.show();
-  if (currentBlock) currentBlock.show();
+  // Glow effect
+  fill(0, 255, 255, 100);
+  text('TOWER TUMBLE', windowWidth / 2 + 2, windowHeight * 0.04 + 2);
+  text('TOWER TUMBLE', windowWidth / 2 - 2, windowHeight * 0.04 - 2);
   
-  for (let p of particles) p.show();
+  // Main text
+  fill(0, 255, 255);
+  text('TOWER TUMBLE', windowWidth / 2, windowHeight * 0.04);
+  pop();
   
-  fill(0, 0, 0, 180);
-  noStroke();
-  rect(0, 0, width, 60);
+  // Player 1 side panel (left side)
+  push();
+  translate(p1X - SIDE_PANEL_WIDTH - 10, gameY);
+  drawPlayerPanel(players[0], 'left');
+  pop();
   
-  fill(255);
-  textAlign(LEFT, CENTER);
-  textSize(20);
-  text('Score: ' + score, 20, 30);
+  // Player 2 side panel (right side)
+  push();
+  translate(p2X + GAME_AREA_WIDTH + 10, gameY);
+  drawPlayerPanel(players[1], 'right');
+  pop();
   
-  textAlign(RIGHT, CENTER);
-  text('Blocks: ' + blocks.length, width - 20, 30);
+  // Draw game areas
+  players[0].draw();
+  players[1].draw();
   
-  if (currentBlock && currentBlock.onCrane) {
-    textAlign(CENTER, CENTER);
-    textSize(16);
-    fill(200);
-    text('CLICK/SPACE: DROP', width/2, 30);
+  // Draw center divider
+  stroke(60, 70, 100);
+  strokeWeight(3);
+  let dividerX = windowWidth / 2;
+  line(dividerX, gameY, dividerX, gameY + GAME_AREA_HEIGHT);
+  
+  // VS label - Neon holographic
+  push();
+  let vsTextSize = min(windowWidth * 0.03, 28);
+  textSize(vsTextSize);
+  textAlign(CENTER, CENTER);
+  textStyle(BOLD);
+  
+  // Pulsing glow
+  let glowIntensity = sin(frameCount * 0.08) * 30 + 120;
+  fill(255, 255, 0, glowIntensity);
+  text('VS', dividerX + 2, gameY + GAME_AREA_HEIGHT / 2 + 2);
+  fill(255, 100, 255, glowIntensity);
+  text('VS', dividerX - 2, gameY + GAME_AREA_HEIGHT / 2 - 2);
+  
+  // Main text
+  fill(255, 255, 0);
+  text('VS', dividerX, gameY + GAME_AREA_HEIGHT / 2);
+  textStyle(NORMAL);
+  pop();
+  
+  // Draw particles
+  for (let p of particles) {
+    p.draw();
+  }
+  
+  // Draw controls reminder at bottom with glow
+  let controlTextSize = min(windowWidth * 0.015, 14);
+  textSize(controlTextSize);
+  textAlign(CENTER, CENTER);
+  fill(0, 255, 255, 100);
+  text('P1: A/D Move, W Drop  |  P2: ←/→ Move, ↑ Drop', windowWidth / 2 + 1, windowHeight - 19);
+  fill(0, 255, 255);
+  text('P1: A/D Move, W Drop  |  P2: ←/→ Move, ↑ Drop', windowWidth / 2, windowHeight - 20);
+}
+
+function drawPlayerPanel(player, side) {
+  let panelX = 10;
+  
+  // Player label with neon glow
+  let labelColor = player.id === 1 ? color(0, 255, 255) : color(255, 100, 255);
+  let labelSize = min(SIDE_PANEL_WIDTH * 0.18, 20);
+  let scoreSize = min(SIDE_PANEL_WIDTH * 0.14, 16);
+  let scoreValueSize = min(SIDE_PANEL_WIDTH * 0.22, 24);
+  let smallTextSize = min(SIDE_PANEL_WIDTH * 0.12, 13);
+  
+  textAlign(CENTER, TOP);
+  textSize(labelSize);
+  textStyle(BOLD);
+  
+  // Glow effect
+  fill(red(labelColor), green(labelColor), blue(labelColor), 80);
+  text('PLAYER ' + player.id, SIDE_PANEL_WIDTH / 2 + 1, 11);
+  
+  // Main text
+  fill(labelColor);
+  text('PLAYER ' + player.id, SIDE_PANEL_WIDTH / 2, 10);
+  textStyle(NORMAL);
+  
+  // Score with glow
+  fill(150, 200, 255);
+  textSize(scoreSize);
+  text('Score', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.15);
+  
+  textSize(scoreValueSize);
+  // Glow
+  fill(red(labelColor), green(labelColor), blue(labelColor), 100);
+  text(player.score, SIDE_PANEL_WIDTH / 2 + 1, GAME_AREA_HEIGHT * 0.15 + scoreSize + 6);
+  // Main
+  fill(labelColor);
+  text(player.score, SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.15 + scoreSize + 5);
+  
+  // Next block preview
+  fill(180);
+  textSize(smallTextSize);
+  text('NEXT', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.35);
+  
+  let previewX = (SIDE_PANEL_WIDTH - BLOCK_SIZE - 10) / 2;
+  let previewY = GAME_AREA_HEIGHT * 0.4;
+  player.drawNextBlock(previewX, previewY);
+  
+  // Controls reminder
+  fill(100);
+  textSize(smallTextSize * 0.85);
+  if (player.id === 1) {
+    text('A/D: Move', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7);
+    text('W: Drop', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7 + smallTextSize * 1.2);
+  } else {
+    text('←/→: Move', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7);
+    text('↑: Drop', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7 + smallTextSize * 1.2);
   }
 }
 
-function drawGameOver() {
-  background(15, 20, 35);
+// ============================================
+// WIN SCREEN
+// ============================================
+function drawWinScreen() {
+  // Dark overlay
+  fill(0, 0, 0, 200);
+  rect(0, 0, windowWidth, windowHeight);
   
-  fill(50, 20, 20, 200);
-  rect(0, 0, width, height);
+  // Holographic frame
+  stroke(255, 215, 0, 150);
+  strokeWeight(3);
+  noFill();
+  let frameW = windowWidth * 0.6;
+  let frameH = windowHeight * 0.5;
+  let frameX = windowWidth / 2 - frameW / 2;
+  let frameY = windowHeight / 2 - frameH / 2;
+  rect(frameX, frameY, frameW, frameH, 10);
   
-  fill(255, 80, 80);
+  // Outer glow
+  stroke(255, 215, 0, 50);
+  strokeWeight(10);
+  rect(frameX - 5, frameY - 5, frameW + 10, frameH + 10, 10);
+  
+  // Winner announcement with neon glow
+  let winnerColor = winner === 1 ? color(0, 255, 255) : color(255, 100, 255);
+  
+  let winTextSize = min(windowWidth * 0.06, 56);
+  let scoreTextSize = min(windowWidth * 0.025, 22);
+  let promptTextSize = min(windowWidth * 0.022, 20);
+  
   textAlign(CENTER, CENTER);
-  textSize(56);
-  text('GAME OVER', width/2, height/2 - 80);
+  textSize(winTextSize);
+  textStyle(BOLD);
   
-  fill(255);
-  textSize(28);
-  text('Score: ' + score, width/2, height/2 - 20);
-  text('Blocks: ' + blocks.length, width/2, height/2 + 20);
+  // Glow effect
+  fill(red(winnerColor), green(winnerColor), blue(winnerColor), 150);
+  text('PLAYER ' + winner + ' WINS!', windowWidth / 2 + 3, windowHeight / 2 - 37);
   
-  textSize(24);
-  fill(100, 255, 100);
-  text('CLICK TO RESTART', width/2, height/2 + 100);
+  // Main text
+  fill(winnerColor);
+  text('PLAYER ' + winner + ' WINS!', windowWidth / 2, windowHeight / 2 - 40);
+  textStyle(NORMAL);
+  
+  // Scores with glow
+  textSize(scoreTextSize);
+  fill(0, 255, 255, 120);
+  text('Player 1 Score: ' + players[0].score, windowWidth / 2 + 2, windowHeight / 2 + 22);
+  fill(0, 255, 255);
+  text('Player 1 Score: ' + players[0].score, windowWidth / 2, windowHeight / 2 + 20);
+  
+  fill(255, 100, 255, 120);
+  text('Player 2 Score: ' + players[1].score, windowWidth / 2 + 2, windowHeight / 2 + 52);
+  fill(255, 100, 255);
+  text('Player 2 Score: ' + players[1].score, windowWidth / 2, windowHeight / 2 + 50);
+  
+  // Restart prompt with pulsing glow
+  textSize(promptTextSize);
+  let pulse = sin(frameCount * 0.08) * 50 + 205;
+  fill(0, 255, 100, pulse);
+  text('PRESS SPACE TO PLAY AGAIN', windowWidth / 2 + 2, windowHeight / 2 + 112);
+  fill(0, 255, 100);
+  text('PRESS SPACE TO PLAY AGAIN', windowWidth / 2, windowHeight / 2 + 110);
 }
 
+// ============================================
+// INPUT HANDLING
+// ============================================
 function mousePressed() {
-  handleInput();
+  if (gameState === 'menu') {
+    // Check if 2 Player button was clicked
+    if (twoPlayerButton && twoPlayerButton.enabled) {
+      if (mouseX > twoPlayerButton.x && mouseX < twoPlayerButton.x + twoPlayerButton.w &&
+          mouseY > twoPlayerButton.y && mouseY < twoPlayerButton.y + twoPlayerButton.h) {
+        startGame();
+      }
+    }
+  }
 }
 
 function keyPressed() {
-  if (key === ' ') handleInput();
-}
-
-function handleInput() {
   if (gameState === 'menu') {
-    startGame();
+    if (key === ' ') {
+      startGame();
+    }
   } else if (gameState === 'playing') {
-    releaseBlock();
+    // Player 1 controls (A/D/W)
+    if (key === 'a' || key === 'A') {
+      players[0].moveCrane(-1);
+    } else if (key === 'd' || key === 'D') {
+      players[0].moveCrane(1);
+    } else if (key === 'w' || key === 'W') {
+      players[0].dropBlock();
+    }
+    
+    // Player 2 controls (Arrow keys)
+    if (keyCode === LEFT_ARROW) {
+      players[1].moveCrane(-1);
+    } else if (keyCode === RIGHT_ARROW) {
+      players[1].moveCrane(1);
+    } else if (keyCode === UP_ARROW) {
+      players[1].dropBlock();
+    }
   } else if (gameState === 'gameOver') {
-    startGame();
+    if (key === ' ') {
+      startGame();
+    }
+  }
+  
+  // Prevent default browser behavior for arrow keys
+  if ([32, 37, 38, 39, 40].includes(keyCode)) {
+    return false;
   }
 }
 
+// ============================================
+// GAME LOGIC
+// ============================================
 function startGame() {
   gameState = 'playing';
-  score = 0;
-  blocks = [];
+  winner = null;
   particles = [];
-  swingSpeed = 0.025;
-  crane = new Crane();
-  spawnBlock();
-}
-
-function releaseBlock() {
-  if (currentBlock && currentBlock.onCrane) {
-    currentBlock.onCrane = false;
-    currentBlock.vx = sin(crane.angle) * 3.5;
-    currentBlock.vy = 0;
-  }
-}
-
-function spawnBlock() {
-  let p = crane.getPos();
-  let r = random(100);
-  let type = 'normal';
   
-  if (blocks.length >= 3) {
-    if (r < 12) type = 'heavy';
-    else if (r < 24) type = 'glue';
-    else if (r < 32) type = 'bomb';
-  }
+  // Calculate responsive player positions
+  let gameY = windowHeight * 0.15; // 15% from top
   
-  currentBlock = new Block(p.x, p.y, type);
+  // Player 1 at 25% of screen width (left quarter)
+  let p1X = (windowWidth * 0.25) - (GAME_AREA_WIDTH / 2);
+  
+  // Player 2 at 75% of screen width (right quarter)
+  let p2X = (windowWidth * 0.75) - (GAME_AREA_WIDTH / 2);
+  
+  // Create players
+  players = [
+    new Player(1, p1X, gameY),
+    new Player(2, p2X, gameY)
+  ];
 }
-
-function gameOver() {
-  gameState = 'gameOver';
-}
-//h
