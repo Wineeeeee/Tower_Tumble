@@ -921,8 +921,6 @@ function draw() {
   
   if (gameState === 'menu') {
     drawMenu();
-  } else if (gameState === 'difficultySelect') {
-    drawDifficultyMenu();
   } else if (gameState === 'playing') {
     updateGame();
     drawGame();
@@ -930,60 +928,6 @@ function draw() {
     drawGame();
     drawWinScreen();
   }
-}
-
-function initDifficultyButtons() {
-  difficultyButtons = [];
-  let w = min(windowWidth * 0.25, 260);
-  let h = min(windowHeight * 0.08, 70);
-  let centerX = windowWidth / 2 - w / 2;
-  let startY = windowHeight * 0.4;
-
-  let labels = [
-    { label: 'Easy', sublabel: 'Relaxed' },
-    { label: 'Medium', sublabel: 'Standard' },
-    { label: 'Hard', sublabel: 'Challenging' }
-  ];
-
-  for (let i = 0; i < labels.length; i++) {
-    difficultyButtons.push({
-      x: centerX,
-      y: startY + i * (h + 18),
-      w: w,
-      h: h,
-      label: labels[i].label,
-      sublabel: labels[i].sublabel,
-      enabled: true
-    });
-  }
-
-  // Back button
-  difficultyButtons.push({
-    x: centerX,
-    y: startY + 3 * (h + 18),
-    w: w,
-    h: h * 0.8,
-    label: 'Back',
-    sublabel: '',
-    enabled: true
-  });
-}
-
-function drawDifficultyMenu() {
-  // Dark overlay
-  fill(0, 0, 0, 200);
-  rect(0, 0, windowWidth, windowHeight);
-
-  // Title
-  push();
-  textAlign(CENTER, CENTER);
-  textSize(min(windowWidth * 0.04, 36));
-  fill(0, 255, 255);
-  text('Select Difficulty', windowWidth / 2, windowHeight * 0.22);
-  pop();
-
-  if (!difficultyButtons || difficultyButtons.length === 0) initDifficultyButtons();
-  for (let b of difficultyButtons) drawButton(b);
 }
 
 // ============================================
@@ -1006,8 +950,8 @@ function initMenuButtons() {
     w: buttonWidth,
     h: buttonHeight,
     label: 'Single Player',
-    sublabel: 'Solo Challenge',
-    enabled: true
+    sublabel: 'Coming Soon',
+    enabled: false
   };
   
   twoPlayerButton = {
@@ -1211,14 +1155,7 @@ function drawButton(btn) {
     text('LOCKED', btn.x + btn.w - badgeW / 2 - 10, btn.y + 10 + badgeH / 2);
     textStyle(NORMAL);
   }
-  // Highlight selection when in difficulty menu
-  if (gameState === 'difficultySelect' && btn.label && btn.label.toLowerCase() === selectedDifficulty) {
-    noFill();
-    stroke(0, 255, 100);
-    strokeWeight(3);
-    rect(btn.x - 6, btn.y - 6, btn.w + 12, btn.h + 12, 10);
-  }
-
+  
   pop();
 }
 
@@ -1287,63 +1224,47 @@ function drawGame() {
   text('TOWER TUMBLE', windowWidth / 2, windowHeight * 0.04);
   pop();
   
-  // For single player mode (all difficulties), center player 1 with no player 2
-  if (singlePlayerMode) {
-    // Single player mode: centered player with side panel
-    let centerX = (windowWidth / 2) - (GAME_AREA_WIDTH / 2);
-    
-    // Player 1 side panel (left side of center)
-    push();
-    translate(centerX - SIDE_PANEL_WIDTH - 10, gameY);
-    drawPlayerPanel(players[0], 'left');
-    pop();
-    
-    // Draw only player 1
-    players[0].draw();
-  } else {
-    // Two player mode
-    // Player 1 side panel (left side)
-    push();
-    translate(p1X - SIDE_PANEL_WIDTH - 10, gameY);
-    drawPlayerPanel(players[0], 'left');
-    pop();
-    
-    // Player 2 side panel (right side)
-    push();
-    translate(p2X + GAME_AREA_WIDTH + 10, gameY);
-    drawPlayerPanel(players[1], 'right');
-    pop();
-    
-    // Draw game areas
-    players[0].draw();
-    players[1].draw();
-    
-    // Draw center divider
-    stroke(60, 70, 100);
-    strokeWeight(3);
-    let dividerX = windowWidth / 2;
-    line(dividerX, gameY, dividerX, gameY + GAME_AREA_HEIGHT);
-    
-    // VS label - Neon holographic
-    push();
-    let vsTextSize = min(windowWidth * 0.03, 28);
-    textSize(vsTextSize);
-    textAlign(CENTER, CENTER);
-    textStyle(BOLD);
-    
-    // Pulsing glow
-    let glowIntensity = sin(frameCount * 0.08) * 30 + 120;
-    fill(255, 255, 0, glowIntensity);
-    text('VS', dividerX + 2, gameY + GAME_AREA_HEIGHT / 2 + 2);
-    fill(255, 100, 255, glowIntensity);
-    text('VS', dividerX - 2, gameY + GAME_AREA_HEIGHT / 2 - 2);
-    
-    // Main text
-    fill(255, 255, 0);
-    text('VS', dividerX, gameY + GAME_AREA_HEIGHT / 2);
-    textStyle(NORMAL);
-    pop();
-  }
+  // Player 1 side panel (left side)
+  push();
+  translate(p1X - SIDE_PANEL_WIDTH - 10, gameY);
+  drawPlayerPanel(players[0], 'left');
+  pop();
+  
+  // Player 2 side panel (right side)
+  push();
+  translate(p2X + GAME_AREA_WIDTH + 10, gameY);
+  drawPlayerPanel(players[1], 'right');
+  pop();
+  
+  // Draw game areas
+  players[0].draw();
+  players[1].draw();
+  
+  // Draw center divider
+  stroke(60, 70, 100);
+  strokeWeight(3);
+  let dividerX = windowWidth / 2;
+  line(dividerX, gameY, dividerX, gameY + GAME_AREA_HEIGHT);
+  
+  // VS label - Neon holographic
+  push();
+  let vsTextSize = min(windowWidth * 0.03, 28);
+  textSize(vsTextSize);
+  textAlign(CENTER, CENTER);
+  textStyle(BOLD);
+  
+  // Pulsing glow
+  let glowIntensity = sin(frameCount * 0.08) * 30 + 120;
+  fill(255, 255, 0, glowIntensity);
+  text('VS', dividerX + 2, gameY + GAME_AREA_HEIGHT / 2 + 2);
+  fill(255, 100, 255, glowIntensity);
+  text('VS', dividerX - 2, gameY + GAME_AREA_HEIGHT / 2 - 2);
+  
+  // Main text
+  fill(255, 255, 0);
+  text('VS', dividerX, gameY + GAME_AREA_HEIGHT / 2);
+  textStyle(NORMAL);
+  pop();
   
   // Draw particles
   for (let p of particles) {
@@ -1488,38 +1409,11 @@ function drawWinScreen() {
 // ============================================
 function mousePressed() {
   if (gameState === 'menu') {
-    // Check if Single Player button was clicked -> open difficulty menu
-    if (singlePlayerButton && singlePlayerButton.enabled) {
-      if (mouseX > singlePlayerButton.x && mouseX < singlePlayerButton.x + singlePlayerButton.w &&
-          mouseY > singlePlayerButton.y && mouseY < singlePlayerButton.y + singlePlayerButton.h) {
-        gameState = 'difficultySelect';
-        initDifficultyButtons();
-        return;
-      }
-    }
-
     // Check if 2 Player button was clicked
     if (twoPlayerButton && twoPlayerButton.enabled) {
       if (mouseX > twoPlayerButton.x && mouseX < twoPlayerButton.x + twoPlayerButton.w &&
           mouseY > twoPlayerButton.y && mouseY < twoPlayerButton.y + twoPlayerButton.h) {
-        startGame('two');
-      }
-    }
-  }
-
-  else if (gameState === 'difficultySelect') {
-    // Check difficulty buttons
-    for (let b of difficultyButtons) {
-      if (mouseX > b.x && mouseX < b.x + b.w && mouseY > b.y && mouseY < b.y + b.h) {
-        if (b.label === 'Back') {
-          gameState = 'menu';
-          return;
-        }
-        // Select difficulty and start game immediately
-        let diff = b.label.toLowerCase();
-        selectedDifficulty = diff;
-        startGame('single', diff);
-        return;
+        startGame();
       }
     }
   }
@@ -1528,7 +1422,7 @@ function mousePressed() {
 function keyPressed() {
   if (gameState === 'menu') {
     if (key === ' ') {
-      startGame('two');
+      startGame();
     }
   } else if (gameState === 'playing') {
     // Player 1 controls (A/D/W/S)
@@ -1554,7 +1448,7 @@ function keyPressed() {
     }
   } else if (gameState === 'gameOver') {
     if (key === ' ') {
-      startGame(gameMode, selectedDifficulty);
+      startGame();
     }
   }
   
@@ -1567,37 +1461,27 @@ function keyPressed() {
 // ============================================
 // GAME LOGIC
 // ============================================
-function startGame(mode = 'two', difficulty = 'medium') {
-  gameMode = mode;
-  selectedDifficulty = difficulty;
-  singlePlayerMode = (mode === 'single');
-
+function startGame() {
   gameState = 'playing';
   winner = null;
   particles = [];
-  lastObstacleSpawn = millis();
-
+  
   // Calculate responsive player positions
   let gameY = windowHeight * 0.15; // 15% from top
-  if (singlePlayerMode) {
-    // Single player mode (any difficulty): centered on screen
-    let centerX = (windowWidth / 2) - (GAME_AREA_WIDTH / 2);
-    players = [new Player(1, centerX, gameY)];
-  } else {
-    // Two player mode: side by side
-    let p1X = (windowWidth * 0.25) - (GAME_AREA_WIDTH / 2);
-    let p2X = (windowWidth * 0.75) - (GAME_AREA_WIDTH / 2);
-
-    players = [
-      new Player(1, p1X, gameY),
-      new Player(2, p2X, gameY)
-    ];
-
-    // Mark player 2 as AI for medium/hard (not implemented yet)
-    if (singlePlayerMode && difficulty !== 'easy') {
-      players[1].isAI = true;
-    } else {
-      players[1].isAI = false;
-    }
-  }
+  
+  // Player 1 at 25% of screen width (left quarter)
+  let p1X = (windowWidth * 0.25) - (GAME_AREA_WIDTH / 2);
+  
+  // Player 2 at 75% of screen width (right quarter)
+  let p2X = (windowWidth * 0.75) - (GAME_AREA_WIDTH / 2);
+  
+  // Create players
+  players = [
+    new Player(1, p1X, gameY),
+    new Player(2, p2X, gameY)
+  ];
+  
+  // Set opponent references for power attacks
+  players[0].opponent = players[1];
+  players[1].opponent = players[0];
 }
