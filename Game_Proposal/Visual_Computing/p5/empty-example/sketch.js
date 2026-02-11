@@ -7,15 +7,28 @@ let gameState = 'menu';
 let winner = null;
 let players = [];
 let particles = [];
+let pieceIdCounter = 0; // Unique ID generator for each piece
 
-// COLOR PALETTE (5 distinct colors)
+// COLOR PALETTE (3 colors for high match frequency = harder gameplay)
 let COLORS;
 
+// TETROMINO SHAPES (colors assigned randomly for matching mechanic)
+const SHAPES = {
+  I: { blocks: [[0,0], [0,1], [0,2], [0,3]] },      // Line piece
+  J: { blocks: [[0,0], [1,0], [1,1], [1,2]] },      // J piece
+  L: { blocks: [[0,2], [1,0], [1,1], [1,2]] },      // L piece
+  O: { blocks: [[0,0], [0,1], [1,0], [1,1]] },      // Square piece
+  S: { blocks: [[0,1], [0,2], [1,0], [1,1]] },      // S piece
+  T: { blocks: [[0,1], [1,0], [1,1], [1,2]] },      // T piece
+  Z: { blocks: [[0,0], [0,1], [1,1], [1,2]] }       // Z piece
+};
+const SHAPE_NAMES = ['I', 'J', 'L', 'O', 'S', 'T', 'Z'];
+
 // CONSTANTS (Grid structure)
-const COLS = 4;           // 4 columns per player
-const ROWS = 12;          // Grid height
-const DROP_SPEED = 8;     // Falling speed
-const TNT_CHANCE = 0.08;  // 8% chance for TNT block
+const COLS = 10;          // 10 columns per player (expanded for Tetris pieces)
+const ROWS = 16;          // Grid height (increased for more gameplay space)
+const DROP_SPEED = 12;    // Falling speed (faster for larger grid)
+const TNT_CHANCE = 0.05;  // 5% chance for TNT block (reduced)
 
 // DYNAMIC LAYOUT VARIABLES (recalculated on resize)
 let BLOCK_SIZE;
@@ -46,25 +59,68 @@ function calculateLayout() {
 }
 
 // ============================================
+// PIECE CLASS (Tetromino)
+// ============================================
+class Piece {
+  constructor(shapeName) {
+    this.shapeName = shapeName;
+    this.shape = SHAPES[shapeName];
+    this.blocks = JSON.parse(JSON.stringify(this.shape.blocks)); // Deep copy
+    this.colorIndex = floor(random(3)); // Randomly assign one of 3 colors
+    this.isTNT = false;
+    this.id = pieceIdCounter++; // Assign unique ID to track piece identity
+  }
+  
+  // Rotate the piece 90 degrees clockwise
+  rotate() {
+    if (this.shapeName === 'O') return; // Square doesn't rotate
+    
+    // Rotate each block around center: (x,y) -> (y, -x)
+    let rotated = [];
+    for (let block of this.blocks) {
+      rotated.push([block[1], -block[0]]);
+    }
+    
+    // Normalize to positive coordinates
+    let minRow = Math.min(...rotated.map(b => b[0]));
+    let minCol = Math.min(...rotated.map(b => b[1]));
+    
+    this.blocks = rotated.map(b => [b[0] - minRow, b[1] - minCol]);
+  }
+  
+  // Get width of the piece
+  getWidth() {
+    return Math.max(...this.blocks.map(b => b[1])) + 1;
+  }
+  
+  // Get height of the piece
+  getHeight() {
+    return Math.max(...this.blocks.map(b => b[0])) + 1;
+  }
+}
+
+// ============================================
 // PLAYER CLASS
 // ============================================
 class Player {
   constructor(id, offsetX, offsetY) {
     this.id = id;
-    this.offsetX = offsetX;  // X offset for this player's game area
-    this.offsetY = offsetY;  // Y offset for this player's game area
+    this.offsetX = offsetX;
+    this.offsetY = offsetY;
     this.grid = this.createEmptyGrid();
-    this.craneCol = 1;  // Start in second column (0-indexed)
-    this.currentBlock = null;
-    this.nextBlockColor = null;
-    this.nextBlockIsTNT = false;
+    this.currentPiece = null;
+    this.nextPiece = null;
+    this.pieceCol = 3;  // Starting column (center-ish)
+    this.pieceRow = -2; // Start above visible area
     this.dropping = false;
     this.dropY = 0;
     this.score = 0;
-    this.comboCount = 0;
+    this.powerMeter = 0; // 0-100%, fills 25% per line
+    this.chargedLines = new Set(); // Track which lines have been charged
+    this.opponent = null; // Reference to opponent player
     
-    this.prepareNextBlock();
-    this.spawnBlock();
+    this.prepareNextPiece();
+    this.spawnPiece();
   }
   
   createEmptyGrid() {
@@ -78,79 +134,366 @@ class Player {
     return grid;
   }
   
-  prepareNextBlock() {
-    // Determine next block
-    this.nextBlockIsTNT = random() < TNT_CHANCE;
-    if (!this.nextBlockIsTNT) {
-      this.nextBlockColor = floor(random(5));  // 0-4 for 5 colors
-    }
-  }
-  
-  spawnBlock() {
-    if (this.nextBlockIsTNT) {
-      this.currentBlock = { color: -1, isTNT: true };
+  prepareNextPiece() {
+    // Small chance for TNT, otherwise random Tetromino
+    if (random() < TNT_CHANCE) {
+      this.nextPiece = { isTNT: true };
     } else {
-      this.currentBlock = { color: this.nextBlockColor, isTNT: false };
+      let shapeName = random(SHAPE_NAMES);
+      this.nextPiece = new Piece(shapeName);
     }
+  }
+  
+  spawnPiece() {
+    this.currentPiece = this.nextPiece;
+    this.pieceCol = floor(COLS / 2) - 2; // Start near center
+    this.pieceRow = -2; // Start above visible area
     this.dropping = false;
-    this.dropY = 0;
-    this.prepareNextBlock();
+    this.dropY = this.pieceRow * BLOCK_SIZE;
+    this.prepareNextPiece();
   }
   
-  moveCrane(dir) {
-    if (this.dropping) return;
-    this.craneCol = constrain(this.craneCol + dir, 0, COLS - 1);
+  movePiece(dir) {
+    if (this.dropping || !this.currentPiece) return;
+    
+    let newCol = this.pieceCol + dir;
+    
+    // Check if move is valid
+    if (this.canPlacePiece(this.pieceRow, newCol, this.currentPiece)) {
+      this.pieceCol = newCol;
+    }
   }
   
-  dropBlock() {
-    if (this.dropping || !this.currentBlock) return;
+  rotatePiece() {
+    if (this.dropping || !this.currentPiece || this.currentPiece.isTNT) return;
+    
+    // Try rotation
+    let originalBlocks = JSON.parse(JSON.stringify(this.currentPiece.blocks));
+    this.currentPiece.rotate();
+    
+    // Check if rotation is valid, if not revert
+    if (!this.canPlacePiece(this.pieceRow, this.pieceCol, this.currentPiece)) {
+      this.currentPiece.blocks = originalBlocks;
+    }
+  }
+  
+  dropPiece() {
+    if (this.dropping || !this.currentPiece) return;
     this.dropping = true;
-    this.dropY = 0;
+  }
+  
+  canPlacePiece(row, col, piece) {
+    if (!piece || piece.isTNT) {
+      // For TNT (single block)
+      if (col < 0 || col >= COLS) return false;
+      if (row >= 0 && row < ROWS && this.grid[row][col] !== null) return false;
+      return true;
+    }
+    
+    // Check each block of the Tetromino
+    for (let block of piece.blocks) {
+      let r = row + block[0];
+      let c = col + block[1];
+      
+      // Check boundaries
+      if (c < 0 || c >= COLS) return false;
+      if (r >= ROWS) return false;
+      
+      // Check collision with existing blocks (only if in visible area)
+      if (r >= 0 && this.grid[r][c] !== null) return false;
+    }
+    
+    return true;
   }
   
   update() {
-    if (this.dropping && this.currentBlock) {
+    if (this.dropping && this.currentPiece) {
       this.dropY += DROP_SPEED;
       
-      // Find landing row
-      let landingRow = this.findLandingRow(this.craneCol);
-      let targetY = landingRow * BLOCK_SIZE;
+      // Calculate landing position
+      let targetRow = this.findLandingRow();
+      let targetY = targetRow * BLOCK_SIZE;
       
       if (this.dropY >= targetY) {
-        // Block has landed
+        // Piece has landed
         this.dropY = targetY;
-        this.placeBlock(landingRow, this.craneCol);
+        this.pieceRow = targetRow;
+        this.placePiece();
         this.dropping = false;
+      } else {
+        this.pieceRow = floor(this.dropY / BLOCK_SIZE);
       }
     }
   }
   
-  findLandingRow(col) {
-    for (let row = ROWS - 1; row >= 0; row--) {
-      if (this.grid[row][col] === null) {
-        return row;
-      }
-    }
-    return -1;  // Column is full
-  }
-  
-  placeBlock(row, col) {
-    if (row < 0) return;  // Column full
+  findLandingRow() {
+    if (!this.currentPiece) return ROWS - 1;
     
-    if (this.currentBlock.isTNT) {
-      // TNT explosion!
-      this.explodeTNT(row, col);
+    if (this.currentPiece.isTNT) {
+      // Single block landing
+      for (let row = max(0, this.pieceRow); row < ROWS; row++) {
+        if (this.grid[row][this.pieceCol] !== null) {
+          return row - 1;
+        }
+      }
+      return ROWS - 1;
+    }
+    
+    // Find lowest valid position for Tetromino
+    for (let testRow = max(0, this.pieceRow); testRow < ROWS; testRow++) {
+      if (!this.canPlacePiece(testRow, this.pieceCol, this.currentPiece)) {
+        return testRow - 1;
+      }
+    }
+    return ROWS - 1;
+  }
+  
+  placePiece() {
+    if (!this.currentPiece) return;
+    
+    if (this.currentPiece.isTNT) {
+      // TNT explosion
+      if (this.pieceRow >= 0 && this.pieceRow < ROWS) {
+        this.explodeTNT(this.pieceRow, this.pieceCol);
+      }
     } else {
-      this.grid[row][col] = this.currentBlock.color;
+      // Place Tetromino blocks with both color AND piece ID
+      console.log('[LOCK] Piece ID', this.currentPiece.id, 'locked at row:', this.pieceRow, 'col:', this.pieceCol, 'color:', window.COLOR_NAMES[this.currentPiece.colorIndex]);
+      for (let block of this.currentPiece.blocks) {
+        let r = this.pieceRow + block[0];
+        let c = this.pieceCol + block[1];
+        
+        if (r >= 0 && r < ROWS && c >= 0 && c < COLS) {
+          this.grid[r][c] = { color: this.currentPiece.colorIndex, id: this.currentPiece.id };
+          console.log('[LOCK] Block placed at [', r, ',', c, '] with color:', window.COLOR_NAMES[this.currentPiece.colorIndex], 'ID:', this.currentPiece.id);
+        }
+      }
+      
       this.score += 10;
       
-      // Check for matches
-      this.comboCount = 0;
-      this.checkAndClearMatches();
+      // STEP 1: Check for color matches (destructive - removes blocks)
+      console.log('[CHECK] Starting match-3 detection...');
+      this.checkMatches();
+      
+      // STEP 2: Check for completed lines (non-destructive - charges power)
+      console.log('[CHECK] Starting line detection...');
+      this.checkLines();
     }
     
-    // Spawn next block
-    this.spawnBlock();
+    // Spawn next piece
+    this.spawnPiece();
+  }
+  
+  checkLines() {
+    // MECHANIC A: Non-Destructive Line Detection (Power-Up Charge)
+    let completedLines = 0;
+    
+    // Check each row from bottom to top
+    for (let row = ROWS - 1; row >= 0; row--) {
+      let isComplete = true;
+      
+      for (let col = 0; col < COLS; col++) {
+        if (this.grid[row][col] === null) {
+          isComplete = false;
+          break;
+        }
+      }
+      
+      if (isComplete) {
+        completedLines++;
+        
+        // Visual Cue: Flash row white briefly (blocks stay on screen)
+        for (let col = 0; col < COLS; col++) {
+          let px = this.offsetX + col * BLOCK_SIZE + BLOCK_SIZE / 2;
+          let py = this.offsetY + row * BLOCK_SIZE + BLOCK_SIZE / 2;
+          // Small white sparkle particles to show charge
+          for (let i = 0; i < 3; i++) {
+            let a = random(TWO_PI);
+            let s = random(1, 3);
+            particles.push(new Particle(px, py, cos(a) * s, sin(a) * s, color(255, 255, 255)));
+          }
+        }
+        // NOTE: Blocks remain on grid - we do NOT remove them!
+      }
+    }
+    
+    // Charge power meter (+20% per line)
+    if (completedLines > 0) {
+      this.powerMeter += completedLines * 20;
+      this.score += completedLines * 50;
+      
+      // Trigger attack at 100%
+      if (this.powerMeter >= 100) {
+        this.powerMeter = 0;
+        this.activatePowerAttack();
+      }
+    }
+  }
+  
+  checkMatches() {
+    // MECHANIC B: Destructive Color Matching (Space Clearing)
+    let matched = this.findMatches();
+    
+    console.log('[MATCH] Found', matched.length, 'blocks to remove');
+    
+    if (matched.length > 0) {
+      console.log('🎯 MATCH FOUND! Removing', matched.length, 'blocks');
+      
+      // Destroy matched blocks
+      for (let pos of matched) {
+        let cellData = this.grid[pos.row][pos.col];
+        let colorIndex = cellData.color;
+        console.log('[REMOVE] Removing block at [', pos.row, ',', pos.col, '] color:', window.COLOR_NAMES[colorIndex], 'ID:', cellData.id);
+        
+        let px = this.offsetX + pos.col * BLOCK_SIZE + BLOCK_SIZE / 2;
+        let py = this.offsetY + pos.row * BLOCK_SIZE + BLOCK_SIZE / 2;
+        this.createPopParticles(px, py, COLORS[colorIndex]);
+        
+        // Set to null (empty)
+        this.grid[pos.row][pos.col] = null;
+      }
+      
+      this.score += matched.length * 15;
+      
+      console.log('[GRAVITY] Applying gravity...');
+      // Apply gravity to fill gaps
+      this.applyGravity();
+      
+      console.log('[CHAIN] Checking for chain reactions...');
+      // Check for chain reactions
+      this.checkMatches();
+    } else {
+      console.log('[MATCH] No matches found');
+    }
+  }
+  
+  findMatches() {
+    let matched = new Set();
+    let visited = new Set();
+    
+    console.log('[SCAN] Scanning entire grid for matches...');
+    this.debugGrid(); // Show grid state
+    
+    // Search entire grid for color groups
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        let key = `${row},${col}`;
+        if (this.grid[row][col] !== null && !visited.has(key)) {
+          let color = this.grid[row][col].color;
+          let group = this.floodFill(row, col, color, new Set());
+          
+          // Count unique piece IDs in this group
+          let uniqueIds = new Set();
+          for (let pos of group) {
+            let [r, c] = pos.split(',').map(Number);
+            let cellId = this.grid[r][c].id;
+            uniqueIds.add(cellId);
+          }
+          
+          console.log('[SCAN] Found group at [', row, ',', col, '] color:', window.COLOR_NAMES[color], '(' + color + ')', 'blocks:', group.size, 'unique pieces:', uniqueIds.size);
+          
+          // Mark all cells in this group as visited
+          for (let pos of group) {
+            visited.add(pos);
+          }
+          
+          // Only pop if 3+ DIFFERENT pieces are connected
+          if (uniqueIds.size >= 3) {
+            console.log('✓ [GROUP] Group has', uniqueIds.size, 'unique pieces (>= 3) - QUALIFIES FOR REMOVAL!');
+            for (let pos of group) {
+              matched.add(pos);
+            }
+          } else {
+            console.log('✗ [GROUP] Group has only', uniqueIds.size, 'unique piece(s) - SAFE (need 3+)');
+          }
+        }
+      }
+    }
+    
+    // Convert set to array
+    let result = [];
+    for (let pos of matched) {
+      let [r, c] = pos.split(',').map(Number);
+      result.push({ row: r, col: c });
+    }
+    
+    console.log('[RESULT] Total blocks to remove:', result.length);
+    return result;
+  }
+  
+  debugGrid() {
+    // Print grid state for debugging (bottom rows only to save space)
+    console.log('=== GRID STATE (Bottom 8 rows) ===');
+    console.log('Legend: R=Red, B=Blue, G=Green, .=empty, [Color:ID]');
+    for (let row = ROWS - 8; row < ROWS; row++) {
+      let rowStr = 'Row ' + row.toString().padStart(2) + ': ';
+      for (let col = 0; col < COLS; col++) {
+        if (this.grid[row][col] === null) {
+          rowStr += '.    ';
+        } else {
+          // Show color and piece ID
+          let colorLabel = ['R', 'B', 'G'][this.grid[row][col].color];
+          let idStr = this.grid[row][col].id.toString().padStart(2);
+          rowStr += colorLabel + ':' + idStr + ' ';
+        }
+      }
+      console.log(rowStr);
+    }
+    console.log('===================================');
+  }
+  
+  floodFill(row, col, targetColor, visited) {
+    let key = `${row},${col}`;
+    
+    // Boundary checks
+    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return visited;
+    if (visited.has(key)) return visited;
+    if (this.grid[row][col] === null || this.grid[row][col].color !== targetColor) return visited;
+    
+    visited.add(key);
+    
+    // Check 4 orthogonal directions
+    this.floodFill(row - 1, col, targetColor, visited);
+    this.floodFill(row + 1, col, targetColor, visited);
+    this.floodFill(row, col - 1, targetColor, visited);
+    this.floodFill(row, col + 1, targetColor, visited);
+    
+    return visited;
+  }
+  
+  activatePowerAttack() {
+    // Attack the opponent by removing their top 3 rows
+    if (this.opponent) {
+      this.opponent.receiveAttack();
+      
+      // Create visual effect at opponent's screen
+      let centerX = this.opponent.offsetX + (GAME_AREA_WIDTH / 2);
+      let centerY = this.opponent.offsetY + (GAME_AREA_HEIGHT / 4);
+      
+      for (let i = 0; i < 50; i++) {
+        let a = random(TWO_PI);
+        let s = random(5, 12);
+        particles.push(new Particle(centerX, centerY, cos(a) * s, sin(a) * s, color(255, 50, 0)));
+      }
+    }
+  }
+  
+  receiveAttack() {
+    // POWER-UP ATTACK: Remove BOTTOM 3 rows (lowers opponent's height)
+    let rowsToRemove = 3;
+    
+    // Remove from bottom rows (ROWS-3, ROWS-2, ROWS-1)
+    for (let row = ROWS - rowsToRemove; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        if (this.grid[row][col] !== null) {
+          // Create pop particles
+          let px = this.offsetX + col * BLOCK_SIZE + BLOCK_SIZE / 2;
+          let py = this.offsetY + row * BLOCK_SIZE + BLOCK_SIZE / 2;
+          this.createPopParticles(px, py, COLORS[this.grid[row][col].color]);
+          this.grid[row][col] = null;
+        }
+      }
+    }
   }
   
   explodeTNT(row, col) {
@@ -158,9 +501,9 @@ class Player {
     let centerX = this.offsetX + col * BLOCK_SIZE + BLOCK_SIZE / 2;
     let centerY = this.offsetY + row * BLOCK_SIZE + BLOCK_SIZE / 2;
     
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 40; i++) {
       let a = random(TWO_PI);
-      let s = random(3, 8);
+      let s = random(4, 10);
       particles.push(new Particle(centerX, centerY, cos(a) * s, sin(a) * s, color(255, 150, 0)));
     }
     
@@ -171,12 +514,11 @@ class Player {
         let c = col + dc;
         if (r >= 0 && r < ROWS && c >= 0 && c < COLS) {
           if (this.grid[r][c] !== null) {
-            // Create pop particles
             let px = this.offsetX + c * BLOCK_SIZE + BLOCK_SIZE / 2;
             let py = this.offsetY + r * BLOCK_SIZE + BLOCK_SIZE / 2;
-            this.createPopParticles(px, py, COLORS[this.grid[r][c]]);
+            this.createPopParticles(px, py, COLORS[this.grid[r][c].color]);
             this.grid[r][c] = null;
-            this.score += 20;
+            this.score += 25;
           }
         }
       }
@@ -184,82 +526,17 @@ class Player {
     
     // Apply gravity
     this.applyGravity();
-    this.checkAndClearMatches();
-  }
-  
-  checkAndClearMatches() {
-    let matched = this.findMatches();
     
-    if (matched.length > 0) {
-      this.comboCount++;
-      
-      // Clear matched blocks
-      for (let pos of matched) {
-        let px = this.offsetX + pos.col * BLOCK_SIZE + BLOCK_SIZE / 2;
-        let py = this.offsetY + pos.row * BLOCK_SIZE + BLOCK_SIZE / 2;
-        this.createPopParticles(px, py, COLORS[this.grid[pos.row][pos.col]]);
-        this.grid[pos.row][pos.col] = null;
-      }
-      
-      this.score += matched.length * 15 * this.comboCount;
-      
-      // Apply gravity
-      this.applyGravity();
-      
-      // Check for chain reactions
-      this.checkAndClearMatches();
-    }
-  }
-  
-  findMatches() {
-    let matched = new Set();
-    
-    // Check all positions for groups of 3+
-    for (let row = 0; row < ROWS; row++) {
-      for (let col = 0; col < COLS; col++) {
-        if (this.grid[row][col] !== null) {
-          let color = this.grid[row][col];
-          let group = this.floodFill(row, col, color, new Set());
-          
-          if (group.size >= 3) {
-            for (let pos of group) {
-              matched.add(pos);
-            }
-          }
-        }
-      }
-    }
-    
-    // Convert set to array of positions
-    let result = [];
-    for (let pos of matched) {
-      let [r, c] = pos.split(',').map(Number);
-      result.push({ row: r, col: c });
-    }
-    
-    return result;
-  }
-  
-  floodFill(row, col, targetColor, visited) {
-    let key = `${row},${col}`;
-    
-    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return visited;
-    if (visited.has(key)) return visited;
-    if (this.grid[row][col] !== targetColor) return visited;
-    
-    visited.add(key);
-    
-    // Check 4 directions (orthogonal only)
-    this.floodFill(row - 1, col, targetColor, visited);
-    this.floodFill(row + 1, col, targetColor, visited);
-    this.floodFill(row, col - 1, targetColor, visited);
-    this.floodFill(row, col + 1, targetColor, visited);
-    
-    return visited;
+    // Check for matches after TNT explosion
+    console.log('[TNT] Checking for matches after explosion...');
+    this.checkMatches();
   }
   
   applyGravity() {
-    // For each column, drop blocks down
+    console.log('[GRAVITY] Applying gravity to grid...');
+    let moveCount = 0;
+    
+    // Drop blocks down in each column
     for (let col = 0; col < COLS; col++) {
       let writeRow = ROWS - 1;
       
@@ -268,11 +545,14 @@ class Player {
           if (row !== writeRow) {
             this.grid[writeRow][col] = this.grid[row][col];
             this.grid[row][col] = null;
+            moveCount++;
           }
           writeRow--;
         }
       }
     }
+    
+    console.log('[GRAVITY] Moved', moveCount, 'blocks down');
   }
   
   createPopParticles(x, y, col) {
@@ -325,13 +605,13 @@ class Player {
     line(this.offsetX + GAME_AREA_WIDTH + 10 - cornerSize, this.offsetY + GAME_AREA_HEIGHT + 10, this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY + GAME_AREA_HEIGHT + 10);
     line(this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY + GAME_AREA_HEIGHT + 10 - cornerSize, this.offsetX + GAME_AREA_WIDTH + 10, this.offsetY + GAME_AREA_HEIGHT + 10);
     
-    // Draw game area background (dark transparent)
+    // Draw game area background
     fill(5, 10, 20, 180);
     noStroke();
     rect(this.offsetX, this.offsetY, GAME_AREA_WIDTH, GAME_AREA_HEIGHT);
     
-    // Draw grid lines (tech grid)
-    stroke(red(frameCol), green(frameCol), blue(frameCol), 20);
+    // Draw grid lines
+    stroke(red(frameCol), green(frameCol), blue(frameCol), 15);
     strokeWeight(1);
     for (let i = 1; i < COLS; i++) {
       let x = this.offsetX + i * BLOCK_SIZE;
@@ -342,18 +622,17 @@ class Player {
       line(this.offsetX, y, this.offsetX + GAME_AREA_WIDTH, y);
     }
     
-    // Draw limit line (neon red)
+    // Draw limit line (win condition)
     stroke(255, 20, 60);
     strokeWeight(3);
     let limitY = this.offsetY + (LIMIT_LINE_ROW + 1) * BLOCK_SIZE;
     line(this.offsetX, limitY, this.offsetX + GAME_AREA_WIDTH, limitY);
     
-    // Glowing limit line
     stroke(255, 20, 60, 100);
     strokeWeight(6);
     line(this.offsetX, limitY, this.offsetX + GAME_AREA_WIDTH, limitY);
     
-    // Draw "WIN LINE" label with glow
+    // WIN LINE label
     fill(255, 20, 60, 150);
     noStroke();
     textSize(11);
@@ -369,108 +648,89 @@ class Player {
         if (this.grid[row][col] !== null) {
           let x = this.offsetX + col * BLOCK_SIZE;
           let y = this.offsetY + row * BLOCK_SIZE;
-          this.drawBlock(x, y, COLORS[this.grid[row][col]], false);
+          this.drawBlock(x, y, COLORS[this.grid[row][col].color]);
         }
       }
     }
     
-    // Draw crane
-    this.drawCrane();
-    
-    // Draw current falling block
-    if (this.currentBlock) {
-      let x = this.offsetX + this.craneCol * BLOCK_SIZE;
-      let y = this.offsetY + (this.dropping ? this.dropY : -BLOCK_SIZE + 10);
-      
-      if (this.currentBlock.isTNT) {
+    // Draw current falling piece
+    if (this.currentPiece) {
+      if (this.currentPiece.isTNT) {
+        let x = this.offsetX + this.pieceCol * BLOCK_SIZE;
+        let y = this.offsetY + this.dropY;
         this.drawTNTBlock(x, y);
       } else {
-        this.drawBlock(x, y, COLORS[this.currentBlock.color], false);
+        // Draw Tetromino
+        for (let block of this.currentPiece.blocks) {
+          let x = this.offsetX + (this.pieceCol + block[1]) * BLOCK_SIZE;
+          let y = this.offsetY + this.dropY + block[0] * BLOCK_SIZE;
+          this.drawBlock(x, y, COLORS[this.currentPiece.colorIndex]);
+        }
       }
     }
     
-    pop();
-  }
-  
-  drawCrane() {
-    let craneX = this.offsetX + this.craneCol * BLOCK_SIZE + BLOCK_SIZE / 2;
-    let craneY = this.offsetY + (-BLOCK_SIZE + 5);
-    let glowCol = this.id === 1 ? color(0, 255, 255) : color(255, 100, 255);
-    
-    push();
-    
-    // Sci-fi data beam
-    stroke(red(glowCol), green(glowCol), blue(glowCol), 40);
-    strokeWeight(BLOCK_SIZE - 8);
-    line(craneX, craneY - 25, craneX, craneY + 10);
-    
-    // Energy beam core
-    stroke(glowCol);
-    strokeWeight(2);
-    line(craneX, craneY - 25, craneX, craneY + 10);
-    
-    // Data injector head
-    fill(10, 15, 25);
-    stroke(glowCol);
-    strokeWeight(3);
-    rect(craneX - 12, craneY - 30, 24, 12, 2);
-    
-    // Holographic brackets
-    noFill();
-    stroke(glowCol);
-    strokeWeight(2);
-    line(craneX - 15, craneY - 28, craneX - 10, craneY - 28);
-    line(craneX - 15, craneY - 28, craneX - 15, craneY - 23);
-    line(craneX + 15, craneY - 28, craneX + 10, craneY - 28);
-    line(craneX + 15, craneY - 28, craneX + 15, craneY - 23);
-    
-    // Column highlight with scan effect
-    noFill();
-    stroke(red(glowCol), green(glowCol), blue(glowCol), 30);
-    strokeWeight(2);
-    rect(this.offsetX + this.craneCol * BLOCK_SIZE + 2, this.offsetY, BLOCK_SIZE - 4, GAME_AREA_HEIGHT);
-    
-    // Scanning line
-    let scanY = (frameCount * 3) % GAME_AREA_HEIGHT;
-    stroke(glowCol);
-    strokeWeight(1);
-    line(this.offsetX + this.craneCol * BLOCK_SIZE + 2, this.offsetY + scanY, 
-         this.offsetX + this.craneCol * BLOCK_SIZE + BLOCK_SIZE - 2, this.offsetY + scanY);
+    // Draw power meter below the game area
+    this.drawPowerMeter();
     
     pop();
   }
   
-  drawBlock(x, y, col, highlighted) {
+  drawPowerMeter() {
+    let meterWidth = GAME_AREA_WIDTH;
+    let meterHeight = 20;
+    let meterX = this.offsetX;
+    let meterY = this.offsetY + GAME_AREA_HEIGHT + 20;
+    
+    // Background
+    fill(5, 10, 20, 200);
+    noStroke();
+    rect(meterX, meterY, meterWidth, meterHeight, 3);
+    
+    // Border
+    let meterCol = this.id === 1 ? color(0, 255, 255) : color(255, 100, 255);
+    stroke(meterCol);
+    strokeWeight(2);
+    noFill();
+    rect(meterX, meterY, meterWidth, meterHeight, 3);
+    
+    // Fill bar
+    if (this.powerMeter > 0) {
+      let fillWidth = (meterWidth - 4) * (this.powerMeter / 100);
+      fill(255, 215, 0, 180);
+      noStroke();
+      rect(meterX + 2, meterY + 2, fillWidth, meterHeight - 4, 2);
+      
+      // Glow effect
+      fill(255, 215, 0, 80);
+      rect(meterX + 2, meterY + 2, fillWidth, meterHeight - 4, 2);
+    }
+    
+    // Label
+    fill(255);
+    noStroke();
+    textSize(11);
+    textAlign(CENTER, CENTER);
+    text('POWER', meterX + meterWidth / 2, meterY + meterHeight / 2);
+  }
+  
+  drawBlock(x, y, col) {
     push();
     
-    // Translucent interior (glass/energy field effect)
+    // Translucent interior
     fill(red(col), green(col), blue(col), 35);
     noStroke();
-    rect(x + 4, y + 4, BLOCK_SIZE - 8, BLOCK_SIZE - 8, 3);
+    rect(x + 3, y + 3, BLOCK_SIZE - 6, BLOCK_SIZE - 6, 2);
     
-    // Thick neon glowing border
+    // Neon border
     noFill();
     stroke(col);
-    strokeWeight(3);
-    rect(x + 3, y + 3, BLOCK_SIZE - 6, BLOCK_SIZE - 6, 3);
+    strokeWeight(2);
+    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 2);
     
     // Outer glow
-    stroke(red(col), green(col), blue(col), 80);
-    strokeWeight(5);
-    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 3);
-    
-    // Inner circuit pattern
-    stroke(col);
-    strokeWeight(1);
-    line(x + 8, y + BLOCK_SIZE/2, x + BLOCK_SIZE - 8, y + BLOCK_SIZE/2);
-    line(x + BLOCK_SIZE/2, y + 8, x + BLOCK_SIZE/2, y + BLOCK_SIZE - 8);
-    
-    // Corner accents
-    strokeWeight(2);
-    point(x + 6, y + 6);
-    point(x + BLOCK_SIZE - 6, y + 6);
-    point(x + 6, y + BLOCK_SIZE - 6);
-    point(x + BLOCK_SIZE - 6, y + BLOCK_SIZE - 6);
+    stroke(red(col), green(col), blue(col), 60);
+    strokeWeight(4);
+    rect(x + 1, y + 1, BLOCK_SIZE - 2, BLOCK_SIZE - 2, 2);
     
     pop();
   }
@@ -482,23 +742,23 @@ class Player {
     // Translucent interior
     fill(255, 50, 0, 40);
     noStroke();
-    rect(x + 4, y + 4, BLOCK_SIZE - 8, BLOCK_SIZE - 8, 3);
+    rect(x + 3, y + 3, BLOCK_SIZE - 6, BLOCK_SIZE - 6, 2);
     
-    // Pulsing glow effect
+    // Pulsing glow
     let pulse = sin(frameCount * 0.15) * 20 + 150;
     stroke(255, 50, 0, pulse);
-    strokeWeight(4);
-    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 3);
-    
-    // Bright neon border
-    stroke(tntCol);
     strokeWeight(3);
-    rect(x + 3, y + 3, BLOCK_SIZE - 6, BLOCK_SIZE - 6, 3);
+    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 2);
+    
+    // Bright border
+    stroke(tntCol);
+    strokeWeight(2);
+    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 2);
     
     // Warning symbol
     fill(255, 255, 0);
     noStroke();
-    textSize(BLOCK_SIZE * 0.3);
+    textSize(BLOCK_SIZE * 0.4);
     textAlign(CENTER, CENTER);
     textStyle(BOLD);
     text('⚠', x + BLOCK_SIZE / 2, y + BLOCK_SIZE / 2);
@@ -511,30 +771,30 @@ class Player {
     push();
     translate(x, y);
     
-    // Holographic preview box
+    // Preview box
     let boxCol = this.id === 1 ? color(0, 255, 255) : color(255, 100, 255);
+    let boxSize = BLOCK_SIZE * 3;
+    
     fill(5, 10, 20, 200);
     stroke(boxCol);
     strokeWeight(2);
-    rect(0, 0, BLOCK_SIZE + 10, BLOCK_SIZE + 10, 3);
+    rect(0, 0, boxSize, boxSize, 3);
     
-    // Corner accents
-    strokeWeight(3);
-    let cs = 6;
-    line(0, 0, cs, 0);
-    line(0, 0, 0, cs);
-    line(BLOCK_SIZE + 10 - cs, 0, BLOCK_SIZE + 10, 0);
-    line(BLOCK_SIZE + 10, 0, BLOCK_SIZE + 10, cs);
-    line(0, BLOCK_SIZE + 10 - cs, 0, BLOCK_SIZE + 10);
-    line(0, BLOCK_SIZE + 10, cs, BLOCK_SIZE + 10);
-    line(BLOCK_SIZE + 10 - cs, BLOCK_SIZE + 10, BLOCK_SIZE + 10, BLOCK_SIZE + 10);
-    line(BLOCK_SIZE + 10, BLOCK_SIZE + 10 - cs, BLOCK_SIZE + 10, BLOCK_SIZE + 10);
-    
-    // Next block
-    if (this.nextBlockIsTNT) {
-      this.drawTNTBlock(5, 5);
-    } else {
-      this.drawBlock(5, 5, COLORS[this.nextBlockColor], false);
+    // Next piece
+    if (this.nextPiece) {
+      if (this.nextPiece.isTNT) {
+        this.drawTNTBlock(boxSize / 2 - BLOCK_SIZE / 2, boxSize / 2 - BLOCK_SIZE / 2);
+      } else {
+        // Center the Tetromino preview
+        let offsetX = (boxSize - this.nextPiece.getWidth() * BLOCK_SIZE) / 2;
+        let offsetY = (boxSize - this.nextPiece.getHeight() * BLOCK_SIZE) / 2;
+        
+        for (let block of this.nextPiece.blocks) {
+          let bx = offsetX + block[1] * BLOCK_SIZE;
+          let by = offsetY + block[0] * BLOCK_SIZE;
+          this.drawBlock(bx, by, COLORS[this.nextPiece.colorIndex]);
+        }
+      }
     }
     
     pop();
@@ -585,14 +845,15 @@ function setup() {
   // Calculate responsive layout
   calculateLayout();
   
-  // Initialize colors - NEON TECH PALETTE
+  // Initialize colors - NEON TECH PALETTE (3 colors for high match frequency)
   COLORS = [
-    color(255, 20, 147),   // Neon Pink
-    color(0, 255, 255),    // Cyan
-    color(0, 255, 100),    // Electric Green
-    color(255, 215, 0),    // Gold
-    color(138, 43, 226)    // Neon Purple
+    color(255, 30, 60),    // Neon Red
+    color(0, 120, 255),    // Neon Blue
+    color(0, 255, 100)     // Neon Green
   ];
+  
+  // Color names for debugging
+  window.COLOR_NAMES = ['Red', 'Blue', 'Green'];
 }
 
 function windowResized() {
@@ -749,15 +1010,15 @@ function drawMenu() {
   textAlign(CENTER, CENTER);
   textSize(min(windowWidth * 0.018, 16));
   fill(0, 255, 255, 150);
-  text('Match 3+ blocks • First to the top wins!', windowWidth / 2 + 1, windowHeight - 59);
+  text('Match 3+ colors pop blocks • Complete lines charge power • Race to the top!', windowWidth / 2 + 1, windowHeight - 59);
   fill(0, 255, 255);
-  text('Match 3+ blocks • First to the top wins!', windowWidth / 2, windowHeight - 60);
+  text('Match 3+ colors pop blocks • Complete lines charge power • Race to the top!', windowWidth / 2, windowHeight - 60);
 }
 
 function drawMenuBackground() {
-  // Draw decorative neon blocks floating in background
-  for (let i = 0; i < 5; i++) {
-    let x = (i + 0.5) * (windowWidth / 5);
+  // Draw decorative neon blocks floating in background (3 colors)
+  for (let i = 0; i < 3; i++) {
+    let x = (i + 1.5) * (windowWidth / 5);
     let yOffset = sin(frameCount * 0.02 + i) * 20;
     let y = windowHeight * 0.1 + yOffset;
     let blockSize = min(windowWidth * 0.04, 50);
@@ -1015,9 +1276,9 @@ function drawGame() {
   textSize(controlTextSize);
   textAlign(CENTER, CENTER);
   fill(0, 255, 255, 100);
-  text('P1: A/D Move, W Drop  |  P2: ←/→ Move, ↑ Drop', windowWidth / 2 + 1, windowHeight - 19);
+  text('P1: A/D Move, W Rotate, S Drop  |  P2: ←/→ Move, ↑ Rotate, ↓ Drop', windowWidth / 2 + 1, windowHeight - 19);
   fill(0, 255, 255);
-  text('P1: A/D Move, W Drop  |  P2: ←/→ Move, ↑ Drop', windowWidth / 2, windowHeight - 20);
+  text('P1: A/D Move, W Rotate, S Drop  |  P2: ←/→ Move, ↑ Rotate, ↓ Drop', windowWidth / 2, windowHeight - 20);
 }
 
 function drawPlayerPanel(player, side) {
@@ -1070,10 +1331,12 @@ function drawPlayerPanel(player, side) {
   textSize(smallTextSize * 0.85);
   if (player.id === 1) {
     text('A/D: Move', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7);
-    text('W: Drop', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7 + smallTextSize * 1.2);
+    text('W: Rotate', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7 + smallTextSize * 1.2);
+    text('S: Drop', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7 + smallTextSize * 2.4);
   } else {
     text('←/→: Move', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7);
-    text('↑: Drop', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7 + smallTextSize * 1.2);
+    text('↑: Rotate', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7 + smallTextSize * 1.2);
+    text('↓: Drop', SIDE_PANEL_WIDTH / 2, GAME_AREA_HEIGHT * 0.7 + smallTextSize * 2.4);
   }
 }
 
@@ -1162,22 +1425,26 @@ function keyPressed() {
       startGame();
     }
   } else if (gameState === 'playing') {
-    // Player 1 controls (A/D/W)
+    // Player 1 controls (A/D/W/S)
     if (key === 'a' || key === 'A') {
-      players[0].moveCrane(-1);
+      players[0].movePiece(-1);
     } else if (key === 'd' || key === 'D') {
-      players[0].moveCrane(1);
+      players[0].movePiece(1);
     } else if (key === 'w' || key === 'W') {
-      players[0].dropBlock();
+      players[0].rotatePiece();
+    } else if (key === 's' || key === 'S') {
+      players[0].dropPiece();
     }
     
     // Player 2 controls (Arrow keys)
     if (keyCode === LEFT_ARROW) {
-      players[1].moveCrane(-1);
+      players[1].movePiece(-1);
     } else if (keyCode === RIGHT_ARROW) {
-      players[1].moveCrane(1);
+      players[1].movePiece(1);
     } else if (keyCode === UP_ARROW) {
-      players[1].dropBlock();
+      players[1].rotatePiece();
+    } else if (keyCode === DOWN_ARROW) {
+      players[1].dropPiece();
     }
   } else if (gameState === 'gameOver') {
     if (key === ' ') {
@@ -1213,4 +1480,8 @@ function startGame() {
     new Player(1, p1X, gameY),
     new Player(2, p2X, gameY)
   ];
+  
+  // Set opponent references for power attacks
+  players[0].opponent = players[1];
+  players[1].opponent = players[0];
 }
