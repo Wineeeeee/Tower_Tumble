@@ -6,23 +6,26 @@
   <title>Tower Tumble: High Stakes</title>
   <script src="../p5.min.js"></script>
   <style>
-    body {
+    /* Strict fullscreen - no scrollbars */
+    html, body {
       margin: 0;
       padding: 0;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
+      overflow: hidden;
+      width: 100%;
+      height: 100%;
+      display: block;
       background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
       font-family: Arial, sans-serif;
     }
     main {
-      text-align: center;
-      padding: 20px;
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      display: block;
     }
     canvas {
-      box-shadow: 0 10px 60px rgba(0,0,0,0.6);
-      border-radius: 4px;
+      display: block;
     }
   </style>
 </head>
