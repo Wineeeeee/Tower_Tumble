@@ -8,6 +8,10 @@ let winner = null;
 let players = [];
 let particles = [];
 let pieceIdCounter = 0; // Unique ID generator for each piece
+let gameMode = 'multi'; // 'single' or 'multi'
+let difficulty = 'MEDIUM'; // 'EASY', 'MEDIUM', 'HARD'
+let difficultyButtons = [];
+let backButton = null;
 
 // COLOR PALETTE (3 colors for high match frequency = harder gameplay)
 let COLORS;
@@ -69,6 +73,19 @@ class Player {
     this.score = 0;
     this.powerMeter = 0;       // 0-100%, fills 25% per line
     this.opponent = null;      // Reference to opponent player
+    
+    // AI properties
+    this.isAI = false;
+    this.aiDifficulty = 'MEDIUM';
+    this.aiTargetCol = -1;
+    this.aiLastMoveTime = 0;
+    this.aiDropTimer = 0;
+    this.aiMoveDelay = 500;    // ms between moves
+    this.aiDropDelay = 800;    // ms before dropping after reaching target
+    this.aiThinkDelay = 300;   // ms before first move on new piece
+    
+    // Obstacle system (single player only)
+    this.obstacleTimer = millis() + 10000; // First obstacle spawns after 10 seconds
     
     // CHAOS MECHANIC A: Block Decay Timer
     this.decayTimer = millis() + random(DECAY_MIN_DELAY, DECAY_MAX_DELAY);
@@ -133,12 +150,199 @@ class Player {
     this.dropping = false;
     this.dropY = this.pieceRow * BLOCK_SIZE;
     this.prepareNextPiece();
+    
+    // Reset AI state for new piece
+    if (this.isAI) {
+      this.aiTargetCol = -1;
+      this.aiDropTimer = millis();
+      this.aiLastMoveTime = millis() + this.aiThinkDelay;
+    }
   }
   
   getBarWidth() {
     // Helper to get the width of the current piece
     if (!this.currentPiece) return 1;
     return this.currentPiece.width || 1;
+  }
+  
+  // ============================================
+  // AI LOGIC
+  // ============================================
+  setupAI(difficultyLevel) {
+    this.isAI = true;
+    this.aiDifficulty = difficultyLevel;
+    
+    switch (difficultyLevel) {
+      case 'EASY':
+        this.aiMoveDelay = 800;
+        this.aiDropDelay = 1200;
+        this.aiThinkDelay = 600;
+        break;
+      case 'MEDIUM':
+        this.aiMoveDelay = 450;
+        this.aiDropDelay = 700;
+        this.aiThinkDelay = 350;
+        break;
+      case 'HARD':
+        this.aiMoveDelay = 200;
+        this.aiDropDelay = 350;
+        this.aiThinkDelay = 150;
+        break;
+    }
+  }
+  
+  updateAI() {
+    if (!this.isAI || !this.currentPiece || this.dropping) return;
+    
+    let now = millis();
+    
+    // Decide target column if not decided yet
+    if (this.aiTargetCol === -1) {
+      this.aiTargetCol = this.aiChooseColumn();
+      this.aiLastMoveTime = now;
+      this.aiDropTimer = now;
+    }
+    
+    // Wait for think delay
+    if (now - this.aiLastMoveTime < this.aiMoveDelay) return;
+    
+    let barWidth = this.getBarWidth();
+    
+    // Move towards target column
+    if (this.pieceCol < this.aiTargetCol) {
+      this.movePiece(1);
+      this.aiLastMoveTime = now;
+    } else if (this.pieceCol > this.aiTargetCol) {
+      this.movePiece(-1);
+      this.aiLastMoveTime = now;
+    } else {
+      // At target column - drop after delay
+      if (now - this.aiDropTimer > this.aiDropDelay) {
+        this.dropPiece();
+        this.aiTargetCol = -1;
+      }
+    }
+  }
+  
+  aiChooseColumn() {
+    let barWidth = this.getBarWidth();
+    let maxCol = COLS - barWidth;
+    
+    if (!this.currentPiece) return floor(random(0, maxCol + 1));
+    
+    // Special pieces: target columns with blocks
+    if (this.currentPiece.isTNT) {
+      // TNT: aim at tallest column
+      let bestCol = floor(random(0, maxCol + 1));
+      let bestHeight = 0;
+      for (let col = 0; col <= maxCol; col++) {
+        let h = this.getColumnHeight(col);
+        if (h > bestHeight) {
+          bestHeight = h;
+          bestCol = col;
+        }
+      }
+      return bestCol;
+    }
+    
+    if (this.currentPiece.isColorBomb) {
+      // Color Bomb: aim at column with most blocks below
+      let bestCol = floor(random(0, maxCol + 1));
+      let bestHeight = 0;
+      for (let col = 0; col <= maxCol; col++) {
+        let h = this.getColumnHeight(col);
+        if (h > bestHeight) {
+          bestHeight = h;
+          bestCol = col;
+        }
+      }
+      return bestCol;
+    }
+    
+    // Normal piece difficulty-based logic
+    if (this.aiDifficulty === 'EASY') {
+      // Random column
+      return floor(random(0, maxCol + 1));
+    } else if (this.aiDifficulty === 'MEDIUM') {
+      // 50% smart, 50% random
+      if (random() < 0.5) {
+        return this.aiFindBestColumn();
+      }
+      return floor(random(0, maxCol + 1));
+    } else {
+      // HARD: Always smart placement
+      return this.aiFindBestColumn();
+    }
+  }
+  
+  aiFindBestColumn() {
+    let barWidth = this.getBarWidth();
+    let maxCol = COLS - barWidth;
+    let bestCol = floor(random(0, maxCol + 1));
+    let bestScore = -999;
+    
+    let targetColor = this.currentPiece.colorIndex;
+    
+    for (let col = 0; col <= maxCol; col++) {
+      let score = 0;
+      
+      for (let i = 0; i < barWidth; i++) {
+        let c = col + i;
+        
+        // Find landing row for this column
+        let landRow = ROWS - 1;
+        for (let row = 0; row < ROWS; row++) {
+          if (this.grid[row][c] !== null) {
+            landRow = row - 1;
+            break;
+          }
+        }
+        
+        if (landRow < 0) {
+          score -= 100; // Column full, avoid
+          continue;
+        }
+        
+        // Check block below for color match
+        if (landRow + 1 < ROWS && this.grid[landRow + 1][c] !== null) {
+          if (this.grid[landRow + 1][c].color === targetColor) {
+            score += 5;
+          }
+        }
+        
+        // Check left neighbor
+        if (c > 0 && this.grid[landRow] !== undefined) {
+          if (this.grid[landRow][c - 1] !== null && this.grid[landRow][c - 1].color === targetColor) {
+            score += 3;
+          }
+        }
+        
+        // Check right neighbor
+        if (c < COLS - 1 && this.grid[landRow] !== undefined) {
+          if (this.grid[landRow][c + 1] !== null && this.grid[landRow][c + 1].color === targetColor) {
+            score += 3;
+          }
+        }
+      }
+      
+      // Prefer building evenly (penalize tall columns)
+      let avgHeight = 0;
+      for (let i = 0; i < barWidth; i++) {
+        avgHeight += this.getColumnHeight(col + i);
+      }
+      avgHeight /= barWidth;
+      score -= avgHeight * 0.3;
+      
+      // Small random factor for variety
+      score += random(-0.5, 0.5);
+      
+      if (score > bestScore) {
+        bestScore = score;
+        bestCol = col;
+      }
+    }
+    
+    return bestCol;
   }
   
   movePiece(dir) {
@@ -216,6 +420,12 @@ class Player {
       // Reset timer for next decay (random interval)
       this.decayTimer = millis() + random(DECAY_MIN_DELAY, DECAY_MAX_DELAY);
     }
+    
+    // Obstacle spawning - only in single player mode
+    if (gameMode === 'single' && millis() > this.obstacleTimer) {
+      this.spawnObstacle();
+      this.obstacleTimer = millis() + 10000; // Next obstacle in 10 seconds
+    }
   }
   
   findLandingRow() {
@@ -244,6 +454,57 @@ class Player {
   
   placePiece() {
     if (!this.currentPiece) return;
+    
+    // Check if landing on obstacle - destroy piece if so
+    let landingOnObstacle = false;
+    let obstaclePositions = [];
+    let r = this.pieceRow;
+    let c = this.pieceCol;
+    let barWidth = this.getBarWidth();
+    
+    for (let i = 0; i < barWidth; i++) {
+      let colIndex = c + i;
+      let belowRow = r + 1;
+      if (belowRow >= 0 && belowRow < ROWS && colIndex >= 0 && colIndex < COLS) {
+        if (this.grid[belowRow][colIndex] !== null && this.grid[belowRow][colIndex].isObstacle) {
+          landingOnObstacle = true;
+          obstaclePositions.push({ row: belowRow, col: colIndex });
+        }
+      }
+    }
+    
+    // If landing on obstacle, destroy both the piece and the obstacles
+    if (landingOnObstacle) {
+      console.log('[OBSTACLE] Piece and obstacle destroyed!');
+      
+      // Destroy the falling piece with red particles
+      for (let i = 0; i < barWidth; i++) {
+        let colIndex = c + i;
+        let px = this.offsetX + colIndex * BLOCK_SIZE + BLOCK_SIZE / 2;
+        let py = this.offsetY + r * BLOCK_SIZE + BLOCK_SIZE / 2;
+        for (let j = 0; j < 12; j++) {
+          let a = random(TWO_PI);
+          let s = random(3, 7);
+          particles.push(new Particle(px, py, cos(a) * s, sin(a) * s, color(255, 100, 100)));
+        }
+      }
+      
+      // Destroy the obstacle blocks with orange particles
+      for (let obsPos of obstaclePositions) {
+        let px = this.offsetX + obsPos.col * BLOCK_SIZE + BLOCK_SIZE / 2;
+        let py = this.offsetY + obsPos.row * BLOCK_SIZE + BLOCK_SIZE / 2;
+        for (let j = 0; j < 15; j++) {
+          let a = random(TWO_PI);
+          let s = random(4, 8);
+          particles.push(new Particle(px, py, cos(a) * s, sin(a) * s, color(255, 150, 0)));
+        }
+        // Remove the obstacle from the grid
+        this.grid[obsPos.row][obsPos.col] = null;
+      }
+      
+      this.spawnPiece();
+      return;
+    }
     
     if (this.currentPiece.isTNT) {
       // TNT explosion
@@ -316,9 +577,9 @@ class Player {
       let isComplete = true;
       let hasUnscoredBlocks = false;
       
-      // Check if row is completely filled
+      // Check if row is completely filled (obstacles don't count)
       for (let col = 0; col < COLS; col++) {
-        if (this.grid[row][col] === null) {
+        if (this.grid[row][col] === null || this.grid[row][col].isObstacle) {
           isComplete = false;
           break;
         }
@@ -429,7 +690,8 @@ class Player {
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
         let key = `${row},${col}`;
-        if (this.grid[row][col] !== null && !visited.has(key)) {
+        // Skip obstacles - they don't participate in matches
+        if (this.grid[row][col] !== null && !this.grid[row][col].isObstacle && !visited.has(key)) {
           let color = this.grid[row][col].color;
           let group = this.floodFill(row, col, color, new Set());
           
@@ -475,12 +737,14 @@ class Player {
   debugGrid() {
     // Print grid state for debugging (bottom rows only to save space)
     console.log('=== GRID STATE (Bottom 8 rows) ===');
-    console.log('Legend: R=Red, B=Blue, G=Green, .=empty | [Color:ID*] *=isScored');
+    console.log('Legend: R=Red, B=Blue, G=Green, X=Obstacle, .=empty | [Color:ID*] *=isScored');
     for (let row = ROWS - 8; row < ROWS; row++) {
       let rowStr = 'Row ' + row.toString().padStart(2) + ': ';
       for (let col = 0; col < COLS; col++) {
         if (this.grid[row][col] === null) {
           rowStr += '.     ';
+        } else if (this.grid[row][col].isObstacle) {
+          rowStr += 'X     ';
         } else {
           // Show color, piece ID, and scored status
           let colorLabel = ['R', 'B', 'G'][this.grid[row][col].color];
@@ -523,7 +787,8 @@ class Player {
       // Scan from top to bottom, left to right
       for (let row = 0; row < ROWS; row++) {
         for (let col = 0; col < COLS; col++) {
-          if (this.grid[row][col] !== null) {
+          // Skip obstacles - they don't slide
+          if (this.grid[row][col] !== null && !this.grid[row][col].isObstacle) {
             // Check if this block is part of a too-steep column
             let currentHeight = this.getColumnHeight(col);
             let leftHeight = this.getColumnHeight(col - 1);
@@ -594,11 +859,11 @@ class Player {
   // CHAOS MECHANIC A: BLOCK DECAY (CLUSTER REMOVAL)
   // ============================================
   applyBlockDecay() {
-    // Find all occupied cells
+    // Find all occupied cells (exclude obstacles)
     let occupiedCells = [];
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
-        if (this.grid[row][col] !== null) {
+        if (this.grid[row][col] !== null && !this.grid[row][col].isObstacle) {
           occupiedCells.push({ row, col });
         }
       }
@@ -706,8 +971,8 @@ class Player {
     
     let blockBelow = this.grid[blockBelowRow][bombCol];
     
-    if (blockBelow === null) {
-      console.log('[COLOR BOMB] Landed on empty space - FIZZLE!');
+    if (blockBelow === null || blockBelow.isObstacle) {
+      console.log('[COLOR BOMB] Landed on empty space or obstacle - FIZZLE!');
       // Create fizzle particles
       let px = this.offsetX + bombCol * BLOCK_SIZE + BLOCK_SIZE / 2;
       let py = this.offsetY + bombRow * BLOCK_SIZE + BLOCK_SIZE / 2;
@@ -730,10 +995,10 @@ class Player {
     
     let removedCount = 0;
     
-    // Scan the ENTIRE grid and remove all blocks matching the target color
+    // Scan the ENTIRE grid and remove all blocks matching the target color (skip obstacles)
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
-        if (this.grid[row][col] !== null && this.grid[row][col].color === targetColor) {
+        if (this.grid[row][col] !== null && !this.grid[row][col].isObstacle && this.grid[row][col].color === targetColor) {
           // Create massive particle explosion
           let px = this.offsetX + col * BLOCK_SIZE + BLOCK_SIZE / 2;
           let py = this.offsetY + row * BLOCK_SIZE + BLOCK_SIZE / 2;
@@ -783,8 +1048,9 @@ class Player {
       // Boundary checks
       if (current.row < 0 || current.row >= ROWS || current.col < 0 || current.col >= COLS) continue;
       
-      // Check if cell is empty or wrong color
+      // Check if cell is empty, obstacle, or wrong color
       if (this.grid[current.row][current.col] === null) continue;
+      if (this.grid[current.row][current.col].isObstacle) continue;
       if (this.grid[current.row][current.col].color !== targetColor) continue;
       
       // Mark as visited and add to cluster
@@ -816,13 +1082,57 @@ class Player {
     return maxHeight;
   }
   
+  // ============================================
+  // OBSTACLE SPAWNING (SINGLE PLAYER)
+  // ============================================
+  spawnObstacle() {
+    // Spawn a random obstacle block on the grid in single player
+    console.log('[OBSTACLE] Spawning new obstacle block...');
+    
+    // Find all empty cells in bottom half of grid
+    let emptyCells = [];
+    for (let row = Math.floor(ROWS / 2); row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        if (this.grid[row][col] === null) {
+          emptyCells.push({ row, col });
+        }
+      }
+    }
+    
+    if (emptyCells.length === 0) {
+      console.log('[OBSTACLE] No empty cells available for obstacle');
+      return;
+    }
+    
+    // Pick random empty cell
+    let cell = random(emptyCells);
+    
+    // Place obstacle
+    this.grid[cell.row][cell.col] = {
+      isObstacle: true
+    };
+    
+    console.log('[OBSTACLE] Obstacle spawned at [', cell.row, ',', cell.col, ']');
+    
+    // Visual effect - red warning particles
+    let px = this.offsetX + cell.col * BLOCK_SIZE + BLOCK_SIZE / 2;
+    let py = this.offsetY + cell.row * BLOCK_SIZE + BLOCK_SIZE / 2;
+    for (let i = 0; i < 20; i++) {
+      let a = random(TWO_PI);
+      let s = random(2, 6);
+      particles.push(new Particle(px, py, cos(a) * s, sin(a) * s, color(255, 50, 0)));
+    }
+  }
+  
   floodFill(row, col, targetColor, visited) {
     let key = `${row},${col}`;
     
     // Boundary checks
     if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return visited;
     if (visited.has(key)) return visited;
-    if (this.grid[row][col] === null || this.grid[row][col].color !== targetColor) return visited;
+    // Skip obstacles and empty cells
+    if (this.grid[row][col] === null || this.grid[row][col].isObstacle) return visited;
+    if (this.grid[row][col].color !== targetColor) return visited;
     
     visited.add(key);
     
@@ -853,13 +1163,13 @@ class Player {
   }
   
   receiveAttack() {
-    // POWER-UP ATTACK: Remove BOTTOM 3 rows (lowers opponent's height)
+    // POWER-UP ATTACK: Remove BOTTOM 3 rows (lowers opponent's height) (except obstacles)
     let rowsToRemove = 3;
     
     // Remove from bottom rows (ROWS-3, ROWS-2, ROWS-1)
     for (let row = ROWS - rowsToRemove; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
-        if (this.grid[row][col] !== null) {
+        if (this.grid[row][col] !== null && !this.grid[row][col].isObstacle) {
           // Create pop particles
           let px = this.offsetX + col * BLOCK_SIZE + BLOCK_SIZE / 2;
           let py = this.offsetY + row * BLOCK_SIZE + BLOCK_SIZE / 2;
@@ -881,13 +1191,13 @@ class Player {
       particles.push(new Particle(centerX, centerY, cos(a) * s, sin(a) * s, color(255, 150, 0)));
     }
     
-    // Clear 3x3 area around explosion
+    // Clear 3x3 area around explosion (except obstacles)
     for (let dr = -1; dr <= 1; dr++) {
       for (let dc = -1; dc <= 1; dc++) {
         let r = row + dr;
         let c = col + dc;
         if (r >= 0 && r < ROWS && c >= 0 && c < COLS) {
-          if (this.grid[r][c] !== null) {
+          if (this.grid[r][c] !== null && !this.grid[r][c].isObstacle) {
             let px = this.offsetX + c * BLOCK_SIZE + BLOCK_SIZE / 2;
             let py = this.offsetY + r * BLOCK_SIZE + BLOCK_SIZE / 2;
             this.createPopParticles(px, py, COLORS[this.grid[r][c].color]);
@@ -914,18 +1224,24 @@ class Player {
     console.log('[GRAVITY] Applying gravity to grid...');
     let moveCount = 0;
     
-    // Drop blocks down in each column
+    // Drop blocks down in each column (obstacles stay in place)
     for (let col = 0; col < COLS; col++) {
       let writeRow = ROWS - 1;
       
       for (let row = ROWS - 1; row >= 0; row--) {
         if (this.grid[row][col] !== null) {
-          if (row !== writeRow) {
-            this.grid[writeRow][col] = this.grid[row][col];
-            this.grid[row][col] = null;
-            moveCount++;
+          // Obstacles don't fall - they stay in their position
+          if (this.grid[row][col].isObstacle) {
+            writeRow = row - 1;
+          } else {
+            // Regular blocks fall
+            if (row !== writeRow) {
+              this.grid[writeRow][col] = this.grid[row][col];
+              this.grid[row][col] = null;
+              moveCount++;
+            }
+            writeRow--;
           }
-          writeRow--;
         }
       }
     }
@@ -942,9 +1258,9 @@ class Player {
   }
   
   checkWinCondition() {
-    // Check if any block is at or above the limit line
+    // Check if any regular block (not obstacle) is at or above the limit line
     for (let col = 0; col < COLS; col++) {
-      if (this.grid[LIMIT_LINE_ROW][col] !== null) {
+      if (this.grid[LIMIT_LINE_ROW][col] !== null && !this.grid[LIMIT_LINE_ROW][col].isObstacle) {
         return true;
       }
     }
@@ -1026,7 +1342,13 @@ class Player {
         if (this.grid[row][col] !== null) {
           let x = this.offsetX + col * BLOCK_SIZE;
           let y = this.offsetY + row * BLOCK_SIZE;
-          this.drawBlock(x, y, COLORS[this.grid[row][col].color]);
+          
+          // Check if it's an obstacle block
+          if (this.grid[row][col].isObstacle) {
+            this.drawObstacle(x, y);
+          } else {
+            this.drawBlock(x, y, COLORS[this.grid[row][col].color]);
+          }
         }
       }
     }
@@ -1201,6 +1523,48 @@ class Player {
     pop();
   }
   
+  drawObstacle(x, y) {
+    push();
+    
+    // Dark rock-like appearance with warning stripes
+    let pulseSpeed = sin(frameCount * 0.1);
+    let warningAlpha = 100 + pulseSpeed * 50;
+    
+    // Dark gray base
+    fill(40, 40, 45, 200);
+    noStroke();
+    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 3);
+    
+    // Warning stripes (diagonal yellow/black)
+    stroke(255, 200, 0, warningAlpha);
+    strokeWeight(3);
+    for (let i = -BLOCK_SIZE; i < BLOCK_SIZE * 2; i += 8) {
+      line(x + i, y, x + i + BLOCK_SIZE, y + BLOCK_SIZE);
+    }
+    
+    // Red pulsing border
+    noFill();
+    stroke(255, 50, 0, warningAlpha);
+    strokeWeight(2);
+    rect(x + 2, y + 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4, 3);
+    
+    // Outer danger glow
+    stroke(255, 50, 0, warningAlpha * 0.5);
+    strokeWeight(4);
+    rect(x, y, BLOCK_SIZE, BLOCK_SIZE, 3);
+    
+    // Skull or X symbol
+    fill(255, 255, 255, 230);
+    noStroke();
+    textSize(BLOCK_SIZE * 0.5);
+    textAlign(CENTER, CENTER);
+    textStyle(BOLD);
+    text('✖', x + BLOCK_SIZE / 2, y + BLOCK_SIZE / 2);
+    textStyle(NORMAL);
+    
+    pop();
+  }
+  
   drawNextBlock(x, y) {
     push();
     translate(x, y);
@@ -1362,6 +1726,8 @@ function draw() {
   
   if (gameState === 'menu') {
     drawMenu();
+  } else if (gameState === 'difficultySelect') {
+    drawDifficultySelect();
   } else if (gameState === 'START_SCREEN') {
     // Draw game in background
     drawGame();
@@ -1400,8 +1766,8 @@ function initMenuButtons() {
     w: buttonWidth,
     h: buttonHeight,
     label: 'Single Player',
-    sublabel: 'Coming Soon',
-    enabled: false
+    sublabel: 'Solo Challenge',
+    enabled: true
   };
   
   twoPlayerButton = {
@@ -1411,6 +1777,50 @@ function initMenuButtons() {
     h: buttonHeight,
     label: '2 Player',
     sublabel: 'Race to the Top!',
+    enabled: true
+  };
+  
+  // Difficulty select buttons
+  initDifficultyButtons();
+}
+
+function initDifficultyButtons() {
+  let buttonWidth = min(windowWidth * 0.25, 280);
+  let buttonHeight = windowHeight * 0.08;
+  buttonHeight = constrain(buttonHeight, 55, 80);
+  let buttonSpacing = windowHeight * 0.03;
+  let startY = windowHeight * 0.42;
+  
+  let difficulties = [
+    { label: 'EASY', sublabel: 'Relaxed pace, simple AI', color: [0, 255, 100] },
+    { label: 'MEDIUM', sublabel: 'Balanced challenge', color: [255, 215, 0] },
+    { label: 'HARD', sublabel: 'Fast & ruthless AI', color: [255, 50, 50] }
+  ];
+  
+  difficultyButtons = [];
+  for (let i = 0; i < difficulties.length; i++) {
+    difficultyButtons.push({
+      x: windowWidth / 2 - buttonWidth / 2,
+      y: startY + i * (buttonHeight + buttonSpacing),
+      w: buttonWidth,
+      h: buttonHeight,
+      label: difficulties[i].label,
+      sublabel: difficulties[i].sublabel,
+      enabled: true,
+      diffColor: difficulties[i].color
+    });
+  }
+  
+  // Back button
+  let backW = min(windowWidth * 0.15, 150);
+  let backH = 45;
+  backButton = {
+    x: windowWidth / 2 - backW / 2,
+    y: startY + 3 * (buttonHeight + buttonSpacing) + 10,
+    w: backW,
+    h: backH,
+    label: '← BACK',
+    sublabel: '',
     enabled: true
   };
 }
@@ -1463,6 +1873,110 @@ function drawMenu() {
   text('Match 3+ colors pop blocks • Complete lines charge power • Race to the top!', windowWidth / 2 + 1, windowHeight - 59);
   fill(0, 255, 255);
   text('Match 3+ colors pop blocks • Complete lines charge power • Race to the top!', windowWidth / 2, windowHeight - 60);
+}
+
+// ============================================
+// DIFFICULTY SELECT SCREEN
+// ============================================
+function drawDifficultySelect() {
+  drawMenuBackground();
+  
+  // Title
+  push();
+  textAlign(CENTER, CENTER);
+  let titleSize = min(windowWidth * 0.06, 55);
+  let subtitleSize = min(windowWidth * 0.03, 28);
+  
+  // "SINGLE PLAYER" header
+  textSize(titleSize);
+  textStyle(BOLD);
+  fill(0, 255, 255, 100);
+  text('SINGLE PLAYER', windowWidth / 2 + 3, windowHeight * 0.18 + 3);
+  fill(0, 255, 255);
+  text('SINGLE PLAYER', windowWidth / 2, windowHeight * 0.18);
+  
+  // "SELECT DIFFICULTY" subtitle
+  textSize(subtitleSize);
+  fill(255, 100, 255, 120);
+  text('SELECT DIFFICULTY', windowWidth / 2 + 2, windowHeight * 0.28 + 2);
+  fill(255, 100, 255);
+  text('SELECT DIFFICULTY', windowWidth / 2, windowHeight * 0.28);
+  textStyle(NORMAL);
+  pop();
+  
+  // Draw difficulty buttons
+  if (difficultyButtons.length === 0) initDifficultyButtons();
+  
+  for (let btn of difficultyButtons) {
+    drawDifficultyButton(btn);
+  }
+  
+  // Draw back button
+  if (backButton) {
+    drawButton(backButton);
+  }
+}
+
+function drawDifficultyButton(btn) {
+  push();
+  
+  let isHovering = mouseX > btn.x && mouseX < btn.x + btn.w &&
+                   mouseY > btn.y && mouseY < btn.y + btn.h;
+  
+  let btnColor = color(btn.diffColor[0], btn.diffColor[1], btn.diffColor[2]);
+  
+  if (isHovering) {
+    // Hover glow
+    fill(btn.diffColor[0], btn.diffColor[1], btn.diffColor[2], 30);
+    noStroke();
+    rect(btn.x - 5, btn.y - 5, btn.w + 10, btn.h + 10, 8);
+    
+    fill(5, 10, 20, 220);
+    stroke(btnColor);
+    strokeWeight(3);
+  } else {
+    fill(5, 10, 20, 180);
+    stroke(red(btnColor), green(btnColor), blue(btnColor), 180);
+    strokeWeight(2);
+  }
+  rect(btn.x, btn.y, btn.w, btn.h, 6);
+  
+  // Corner brackets
+  stroke(btnColor);
+  strokeWeight(3);
+  let cs = 12;
+  noFill();
+  line(btn.x, btn.y, btn.x + cs, btn.y);
+  line(btn.x, btn.y, btn.x, btn.y + cs);
+  line(btn.x + btn.w - cs, btn.y, btn.x + btn.w, btn.y);
+  line(btn.x + btn.w, btn.y, btn.x + btn.w, btn.y + cs);
+  line(btn.x, btn.y + btn.h - cs, btn.x, btn.y + btn.h);
+  line(btn.x, btn.y + btn.h, btn.x + cs, btn.y + btn.h);
+  line(btn.x + btn.w - cs, btn.y + btn.h, btn.x + btn.w, btn.y + btn.h);
+  line(btn.x + btn.w, btn.y + btn.h - cs, btn.x + btn.w, btn.y + btn.h);
+  
+  // Button text
+  textAlign(CENTER, CENTER);
+  let mainTextSize = min(btn.h * 0.45, 30);
+  let subTextSize = min(btn.h * 0.22, 15);
+  
+  // Glow
+  fill(btn.diffColor[0], btn.diffColor[1], btn.diffColor[2], 150);
+  noStroke();
+  textSize(mainTextSize);
+  textStyle(BOLD);
+  text(btn.label, btn.x + btn.w / 2 + 1, btn.y + btn.h / 2 - mainTextSize * 0.25 + 1);
+  
+  // Main text
+  fill(btnColor);
+  text(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2 - mainTextSize * 0.25);
+  
+  textStyle(NORMAL);
+  textSize(subTextSize);
+  fill(200, 200, 220);
+  text(btn.sublabel, btn.x + btn.w / 2, btn.y + btn.h / 2 + mainTextSize * 0.5);
+  
+  pop();
 }
 
 function drawMenuBackground() {
@@ -1696,13 +2210,20 @@ function drawInstructions() {
   textSize(tSize * 1.2);
   textStyle(BOLD);
   fill(255, 100, 255);
-  text('PLAYER 2', p2X, controlY);
-  textStyle(NORMAL);
-  
-  textSize(tSize * 0.9);
-  fill(255, 100, 255, 220);
-  text('← / → - Move', p2X, controlY + tSize * 2);
-  text('↓ - Drop', p2X, controlY + tSize * 3.2);
+  if (gameMode === 'single') {
+    text('CPU (' + difficulty + ')', p2X, controlY);
+    textStyle(NORMAL);
+    textSize(tSize * 0.9);
+    fill(255, 100, 255, 220);
+    text('AI Controlled', p2X, controlY + tSize * 2);
+  } else {
+    text('PLAYER 2', p2X, controlY);
+    textStyle(NORMAL);
+    textSize(tSize * 0.9);
+    fill(255, 100, 255, 220);
+    text('← / → - Move', p2X, controlY + tSize * 2);
+    text('↓ - Drop', p2X, controlY + tSize * 3.2);
+  }
   
   // === GAME MECHANICS ===
   let mechY = controlY + tSize * 5.5;
@@ -1786,6 +2307,11 @@ function drawInstructions() {
 function updateGame() {
   // Update players
   for (let p of players) {
+    // Run AI logic for CPU player
+    if (p.isAI) {
+      p.updateAI();
+    }
+    
     p.update();
     
     // Check win condition
@@ -1896,10 +2422,13 @@ function drawGame() {
   let controlTextSize = min(windowWidth * 0.015, 14);
   textSize(controlTextSize);
   textAlign(CENTER, CENTER);
+  let controlsText = gameMode === 'single' 
+    ? 'P1: A/D Move, S Drop  |  CPU: AI Controlled'
+    : 'P1: A/D Move, S Drop  |  P2: ←/→ Move, ↓ Drop';
   fill(0, 255, 255, 100);
-  text('P1: A/D Move, W Rotate, S Drop  |  P2: ←/→ Move, ↑ Rotate, ↓ Drop', windowWidth / 2 + 1, windowHeight - 19);
+  text(controlsText, windowWidth / 2 + 1, windowHeight - 19);
   fill(0, 255, 255);
-  text('P1: A/D Move, W Rotate, S Drop  |  P2: ←/→ Move, ↑ Rotate, ↓ Drop', windowWidth / 2, windowHeight - 20);
+  text(controlsText, windowWidth / 2, windowHeight - 20);
 }
 
 function drawPlayerPanel(player, side) {
@@ -1907,6 +2436,7 @@ function drawPlayerPanel(player, side) {
   
   // Player label with neon glow
   let labelColor = player.id === 1 ? color(0, 255, 255) : color(255, 100, 255);
+  let playerLabel = (player.isAI) ? 'CPU (' + player.aiDifficulty + ')' : 'PLAYER ' + player.id;
   let labelSize = min(SIDE_PANEL_WIDTH * 0.18, 20);
   let scoreSize = min(SIDE_PANEL_WIDTH * 0.14, 16);
   let scoreValueSize = min(SIDE_PANEL_WIDTH * 0.22, 24);
@@ -1918,11 +2448,11 @@ function drawPlayerPanel(player, side) {
   
   // Glow effect
   fill(red(labelColor), green(labelColor), blue(labelColor), 80);
-  text('PLAYER ' + player.id, SIDE_PANEL_WIDTH / 2 + 1, 11);
+  text(playerLabel, SIDE_PANEL_WIDTH / 2 + 1, 11);
   
   // Main text
   fill(labelColor);
-  text('PLAYER ' + player.id, SIDE_PANEL_WIDTH / 2, 10);
+  text(playerLabel, SIDE_PANEL_WIDTH / 2, 10);
   textStyle(NORMAL);
   
   // Score with glow
@@ -2028,12 +2558,37 @@ function drawWinScreen() {
 // ============================================
 function mousePressed() {
   if (gameState === 'menu') {
+    // Check if Single Player button was clicked
+    if (singlePlayerButton && singlePlayerButton.enabled) {
+      if (mouseX > singlePlayerButton.x && mouseX < singlePlayerButton.x + singlePlayerButton.w &&
+          mouseY > singlePlayerButton.y && mouseY < singlePlayerButton.y + singlePlayerButton.h) {
+        gameState = 'difficultySelect';
+        if (difficultyButtons.length === 0) initDifficultyButtons();
+      }
+    }
     // Check if 2 Player button was clicked
     if (twoPlayerButton && twoPlayerButton.enabled) {
       if (mouseX > twoPlayerButton.x && mouseX < twoPlayerButton.x + twoPlayerButton.w &&
           mouseY > twoPlayerButton.y && mouseY < twoPlayerButton.y + twoPlayerButton.h) {
+        gameMode = 'multi';
         startGame();
       }
+    }
+  } else if (gameState === 'difficultySelect') {
+    // Check difficulty buttons
+    for (let btn of difficultyButtons) {
+      if (mouseX > btn.x && mouseX < btn.x + btn.w &&
+          mouseY > btn.y && mouseY < btn.y + btn.h) {
+        difficulty = btn.label;
+        gameMode = 'single';
+        startGame();
+        return;
+      }
+    }
+    // Check back button
+    if (backButton && mouseX > backButton.x && mouseX < backButton.x + backButton.w &&
+        mouseY > backButton.y && mouseY < backButton.y + backButton.h) {
+      gameState = 'menu';
     }
   } else if (gameState === 'START_SCREEN') {
     // Click to dismiss instructions and start game
@@ -2043,7 +2598,21 @@ function mousePressed() {
 
 function keyPressed() {
   if (gameState === 'menu') {
-    if (key === ' ') {
+    // No space shortcut from menu - must click a button
+  } else if (gameState === 'difficultySelect') {
+    if (key === 'Escape' || key === 'Backspace') {
+      gameState = 'menu';
+    } else if (key === '1') {
+      difficulty = 'EASY';
+      gameMode = 'single';
+      startGame();
+    } else if (key === '2') {
+      difficulty = 'MEDIUM';
+      gameMode = 'single';
+      startGame();
+    } else if (key === '3') {
+      difficulty = 'HARD';
+      gameMode = 'single';
       startGame();
     }
   } else if (gameState === 'START_SCREEN') {
@@ -2061,17 +2630,19 @@ function keyPressed() {
       players[0].dropPiece();
     }
     
-    // Player 2 controls (Arrow keys) - No rotation!
-    if (keyCode === LEFT_ARROW) {
-      players[1].movePiece(-1);
-    } else if (keyCode === RIGHT_ARROW) {
-      players[1].movePiece(1);
-    } else if (keyCode === DOWN_ARROW) {
-      players[1].dropPiece();
+    // Player 2 controls (Arrow keys) - Only in multiplayer!
+    if (gameMode === 'multi') {
+      if (keyCode === LEFT_ARROW) {
+        players[1].movePiece(-1);
+      } else if (keyCode === RIGHT_ARROW) {
+        players[1].movePiece(1);
+      } else if (keyCode === DOWN_ARROW) {
+        players[1].dropPiece();
+      }
     }
   } else if (gameState === 'gameOver') {
     if (key === ' ') {
-      startGame();
+      gameState = 'menu';
     }
   }
   
@@ -2108,4 +2679,9 @@ function startGame() {
   // Set opponent references for power attacks
   players[0].opponent = players[1];
   players[1].opponent = players[0];
+  
+  // Setup AI for single player mode
+  if (gameMode === 'single') {
+    players[1].setupAI(difficulty);
+  }
 }
